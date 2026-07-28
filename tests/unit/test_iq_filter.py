@@ -1,0 +1,66 @@
+from pathlib import Path
+
+from nexus_autofix.iq.filter import BumpSize, classify_bump, filter_findings
+from nexus_autofix.iq.models import Finding
+
+
+def _finding(**overrides) -> Finding:
+    base = dict(
+        component="x", package_url="pkg:maven/x/x@1.0", current_version="1.0.0", target_version="1.0.1",
+        remediation_type="next-non-failing-with-dependencies", is_direct=True, dependency_path=[],
+        parent_component=None, parent_current_version=None, parent_target_version=None,
+        policy_action="Fail", threat_level=8, policy_name="p", cve_ids=[], manifest_path=Path("x"),
+    )
+    base.update(overrides)
+    return Finding(**base)
+
+
+def test_classify_bump_patch():
+    assert classify_bump("1.2.3", "1.2.5") == BumpSize.PATCH
+
+
+def test_classify_bump_minor():
+    assert classify_bump("1.2.3", "1.3.0") == BumpSize.MINOR
+
+
+def test_classify_bump_major():
+    assert classify_bump("1.2.3", "2.0.0") == BumpSize.MAJOR
+
+
+def test_actionable_patch_bump_is_included():
+    result = filter_findings([_finding()], suppressed_components=set())
+    assert len(result.actionable) == 1
+
+
+def test_major_bump_is_escalated():
+    result = filter_findings([_finding(target_version="2.0.0")], suppressed_components=set())
+    assert len(result.escalate) == 1
+    assert not result.actionable
+
+
+def test_no_target_version_is_escalated():
+    result = filter_findings([_finding(target_version=None)], suppressed_components=set())
+    assert len(result.escalate) == 1
+
+
+def test_non_failing_policy_action_is_ignored():
+    result = filter_findings([_finding(policy_action="Warn")], suppressed_components=set())
+    assert len(result.ignore) == 1
+
+
+def test_suppressed_component_is_ignored():
+    result = filter_findings([_finding(component="log4j-api")], suppressed_components={"log4j-api"})
+    assert len(result.ignore) == 1
+
+
+def test_waived_finding_is_ignored():
+    result = filter_findings([_finding(is_waived=True)], suppressed_components=set())
+    assert len(result.ignore) == 1
+
+
+def test_unknown_bump_is_escalated_not_guessed():
+    result = filter_findings(
+        [_finding(current_version="latest", target_version="1.2.3")], suppressed_components=set()
+    )
+    assert len(result.escalate) == 1
+    assert not result.actionable

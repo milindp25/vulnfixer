@@ -3,10 +3,14 @@ import pytest
 from nexus_autofix.verify.toolchain import MissingToolchainError, resolve_java_env, resolve_node_env
 
 
-def _fake_jdk(root, name: str) -> str:
+def _fake_jdk(root, name: str, version: str = "17.0.1") -> str:
     home = root / name
     (home / "bin").mkdir(parents=True)
-    (home / "bin" / "java").write_text("#!/bin/sh\n", encoding="utf-8")
+    java = home / "bin" / "java"
+    # Executable, and answering `java -version` on stderr the way a real JDK does,
+    # so both shutil.which() discovery and version detection behave realistically.
+    java.write_text(f'#!/bin/sh\necho \'openjdk version "{version}"\' >&2\n', encoding="utf-8")
+    java.chmod(0o755)
     return str(home)
 
 
@@ -25,9 +29,34 @@ def test_resolves_java_by_major_version(tmp_path):
     assert result.env["PATH"].endswith("/usr/bin")
 
 
-def test_missing_java_major_raises_naming_declared_and_configured(tmp_path):
-    with pytest.raises(MissingToolchainError, match="17"):
-        resolve_java_env("17.0.1", {"21": _fake_jdk(tmp_path, "jdk21")}, base_env={"PATH": ""})
+def test_unconfigured_major_falls_back_to_java_home(tmp_path):
+    # Nothing configured for 17: use the ambient JDK rather than demanding config.
+    ambient = _fake_jdk(tmp_path, "ambient-jdk")
+    result = resolve_java_env(
+        "17.0.1", {}, base_env={"PATH": "/usr/bin", "JAVA_HOME": ambient}
+    )
+    assert result.env["JAVA_HOME"] == ambient
+    assert result.env["PATH"].startswith(f"{ambient}/bin")
+
+
+def test_unconfigured_major_falls_back_to_java_on_path(tmp_path):
+    ambient = _fake_jdk(tmp_path, "ambient-jdk")
+    result = resolve_java_env("17.0.1", {}, base_env={"PATH": f"{ambient}/bin"})
+    assert result.env["JAVA_HOME"] == ambient
+
+
+def test_configured_major_wins_over_ambient_java_home(tmp_path):
+    configured = _fake_jdk(tmp_path, "configured-jdk")
+    ambient = _fake_jdk(tmp_path, "ambient-jdk")
+    result = resolve_java_env(
+        "17.0.1", {"17": configured}, base_env={"PATH": "/usr/bin", "JAVA_HOME": ambient}
+    )
+    assert result.env["JAVA_HOME"] == configured
+
+
+def test_raises_only_when_no_jdk_can_be_found_at_all():
+    with pytest.raises(MissingToolchainError, match="no JDK could be found"):
+        resolve_java_env("17.0.1", {}, base_env={"PATH": ""})
 
 
 def test_configured_java_path_that_does_not_exist_raises(tmp_path):
@@ -49,9 +78,19 @@ def test_resolves_node_by_major_version(tmp_path):
     assert result.env["PATH"].startswith(node20)
 
 
-def test_missing_node_major_raises(tmp_path):
-    with pytest.raises(MissingToolchainError):
-        resolve_node_env("18.0.0", {"20": _fake_node_dir(tmp_path, "node20")}, base_env={"PATH": ""})
+def test_unconfigured_node_major_falls_back_to_node_on_path(tmp_path):
+    ambient = tmp_path / "ambient-node"
+    ambient.mkdir()
+    node_bin = ambient / "node"
+    node_bin.write_text("#!/bin/sh\necho v20.0.0\n", encoding="utf-8")
+    node_bin.chmod(0o755)
+    result = resolve_node_env("20.11.0", {}, base_env={"PATH": str(ambient)})
+    assert result.env["PATH"].startswith(str(ambient))
+
+
+def test_node_raises_only_when_node_is_nowhere_on_path():
+    with pytest.raises(MissingToolchainError, match="no 'node' was found"):
+        resolve_node_env("20.11.0", {}, base_env={"PATH": ""})
 
 
 def test_configured_node_path_that_does_not_exist_raises(tmp_path):

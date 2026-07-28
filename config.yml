@@ -3,9 +3,21 @@ max_attempts: 2
 poll_timeout_seconds: 900
 default_stage_id: build
 default_gate: pre-pr
+
+# Optional. Leave empty to use whatever is already active on the machine:
+# JAVA_HOME (or `java` on PATH) and `node` on PATH. The version found is checked
+# against what the repo declares in .trident/build.yaml and a mismatch is warned
+# about, not fatal.
+#
+# Only pin paths here when one machine needs several JDKs/Node versions across
+# different repos. Keys are MAJOR versions; values are the JDK home / Node bin dir:
+#   java:
+#     "17": /Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home
+#     "21": /Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home
 toolchains:
-  java:
-    "21": /usr/bin  # placeholder — set to a real JAVA_HOME-style dir per major version
-  node:
-    "24": /usr/local/bin  # placeholder — set to a real Node install dir per major version
+  java: {}
+  node: {}
+
+# REQUIRED: Nexus IQ public application ID -> git clone URL.
+#   payments-core: https://github.com/your-org/payments-core.git
 repos: {}

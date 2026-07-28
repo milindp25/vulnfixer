@@ -140,10 +140,13 @@ def test_missing_trident_file_escalates(tmp_path):
     assert result.escalated == [_finding()]
 
 
-def test_missing_toolchain_escalates_before_agent_runs(tmp_path):
+def test_unusable_toolchain_escalates_before_agent_runs(tmp_path):
+    # An unconfigured major now falls back to the ambient JDK, so the remaining hard
+    # failure is a *configured* path that isn't there. Either way the run must escalate
+    # before the agent is invoked, so it never burns an attempt on an environment problem.
     (tmp_path / ".trident").mkdir()
     (tmp_path / ".trident" / "build.yaml").write_text(
-        "strategy:\n  uses: gradle\n  with:\n    java-version: 99.0.0\n", encoding="utf-8"
+        "strategy:\n  uses: gradle\n  with:\n    java-version: 17.0.1\n", encoding="utf-8"
     )
     agent_called = {"count": 0}
 
@@ -154,7 +157,8 @@ def test_missing_toolchain_escalates_before_agent_runs(tmp_path):
 
     orchestrator = _orchestrator(StateStore(tmp_path / "state.db"), agent=CountingAgent())
     result = orchestrator.run(
-        run_config=_run_config(java_toolchains={"17": "/opt/jdk17"}), worktree=tmp_path, commit_sha="abc123",
+        run_config=_run_config(java_toolchains={"17": str(tmp_path / "no-such-jdk")}),
+        worktree=tmp_path, commit_sha="abc123",
         findings=[_finding()], repo_name="demo", baseline_report_id="report-1",
     )
     assert result.outcome == RunOutcome.ESCALATED

@@ -304,15 +304,20 @@ def _echo_findings(label: str, findings: list[Finding]) -> None:
 
 
 @main.command("run")
-@click.option("--app-id", required=True)
-@click.option("--branch", required=True)
+@click.option("--app-id", default=None, help="IQ public application ID. Defaults to $NEXUSFIX_APP_ID.")
+@click.option("--branch", default=None, help="Branch to scan and target the PR at. Defaults to $NEXUSFIX_BRANCH.")
 @click.option("--gate", default=None, type=click.Choice(["none", "pre-pr", "pre-push"]))
 @click.option("--dry-run", is_flag=True, default=False)
 @click.option("--mock-agent", is_flag=True, default=False)
 @click.option("-v", "--verbose", is_flag=True, default=False,
               help="Echo full IQ request/response bodies to the console (always in the log file).")
 def run_command(
-    app_id: str, branch: str, gate: str | None, dry_run: bool, mock_agent: bool, verbose: bool
+    app_id: str | None,
+    branch: str | None,
+    gate: str | None,
+    dry_run: bool,
+    mock_agent: bool,
+    verbose: bool,
 ):
     """
     Discovers findings from Nexus IQ, runs the agent loop, and (unless --dry-run) opens a PR.
@@ -320,10 +325,23 @@ def run_command(
     Talks to the live Nexus IQ instance and repo configured in .env and config.yml.
     --dry-run performs every real step except mutating the remote; --mock-agent
     substitutes a no-op agent so the pipeline can be smoke-tested without the Copilot CLI.
+
+    --app-id and --branch fall back to $NEXUSFIX_APP_ID / $NEXUSFIX_BRANCH when omitted,
+    so the pair you work on most can live in .env. An explicit flag always wins.
     """
     config = load_project_config(Path("config.yml"))
     secrets = load_secrets()
     effective_gate = gate or config.default_gate
+
+    app_id = app_id or secrets.default_app_id
+    branch = branch or secrets.default_branch
+    if not app_id:
+        raise click.ClickException(
+            "no application id: pass --app-id or set NEXUSFIX_APP_ID in .env. "
+            "This is the Nexus IQ *public* application ID."
+        )
+    if not branch:
+        raise click.ClickException("no branch: pass --branch or set NEXUSFIX_BRANCH in .env.")
 
     if app_id not in config.repos:
         raise click.ClickException(
@@ -331,16 +349,21 @@ def run_command(
         )
     _require_secrets(secrets, dry_run)
 
-    result = perform_run(
-        app_id=app_id,
-        branch=branch,
-        gate=effective_gate,
-        dry_run=dry_run,
-        mock_agent=mock_agent,
-        config=config,
-        secrets=secrets,
-        verbose=verbose,
-    )
+    try:
+        result = perform_run(
+            app_id=app_id,
+            branch=branch,
+            gate=effective_gate,
+            dry_run=dry_run,
+            mock_agent=mock_agent,
+            config=config,
+            secrets=secrets,
+            verbose=verbose,
+        )
+    except Exception as exc:
+        # The full traceback is already in the run's log file (perform_run logs it);
+        # the console gets the actionable one-liner instead of a wall of stack frames.
+        raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
 
     click.echo(f"\noutcome: {result.outcome.value}  (run {result.run_id})")
     _echo_findings("FIXED", result.fixed)

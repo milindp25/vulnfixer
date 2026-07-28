@@ -140,11 +140,29 @@ reporting.
 | 1 | Nexus IQ base URL | `.env` → `NEXUSFIX_IQ_URL` | e.g. `https://iq.corp.example.com` |
 | 2 | IQ user token ID | `.env` → `NEXUSFIX_IQ_USERNAME` | IQ user tokens are an ID/secret pair |
 | 3 | IQ user token secret | `.env` → `NEXUSFIX_IQ_PASSWORD` | |
-| 4 | GitHub/GHES token | `.env` → `NEXUSFIX_GITHUB_TOKEN` | needs repo + PR scope. Not required with `--dry-run` |
-| 5 | GHES API URL | `.env` → `NEXUSFIX_GITHUB_API_URL` | **only** if not github.com |
-| 6 | app-id → repo URL | `config.yml` → `repos:` | the app-id must be the IQ **public** application ID |
-| 7 | Real JDK/Node paths | `config.yml` → `toolchains:` | one entry per major version your repos declare |
-| 8 | `--app-id` and `--branch` | CLI args | branch is the one to scan and to target the PR at |
+| 4 | GitHub token | `.env` → `NEXUSFIX_GITHUB_TOKEN` | needs repo + PR scope. Not required with `--dry-run` |
+| 5 | app-id → repo URL | `config.yml` → `repos:` | the app-id must be the IQ **public** application ID |
+| 6 | app-id and branch | `.env` → `NEXUSFIX_APP_ID` / `NEXUSFIX_BRANCH`, **or** `--app-id` / `--branch` | put them in `.env` and you can just run `nexusfix run`; a CLI flag overrides |
+
+Optional, only if the defaults don't fit:
+
+| Input | Where | When you need it |
+|---|---|---|
+| GHES API URL | `.env` → `NEXUSFIX_GITHUB_API_URL` | only if you're **not** on github.com |
+| JDK / Node paths | `config.yml` → `toolchains:` | only if one machine juggles several JDK/Node versions across repos. Left empty, it uses `JAVA_HOME` (or `java` on `PATH`) and `node` on `PATH` |
+| Workspace root | `.env` → `NEXUSFIX_WORKSPACE_ROOT` | defaults to `~/nfx` |
+
+**Toolchains are optional on purpose.** With `toolchains:` empty, a run uses whatever JDK/Node is
+already active on your machine. It still reads the version the repo declares in
+`.trident/build.yaml`, compares it against what it found, and **warns** on a mismatch rather than
+failing — you might knowingly be on a newer JDK, which usually works, but if the build then fails
+to compile, that warning in the log is the first thing to check. A run only fails outright when no
+JDK/Node can be found at all.
+
+**The branch you give is used everywhere**, consistently: it's resolved to a commit SHA on the
+remote (`origin/<branch>`), that exact SHA is what Nexus IQ scans and what the worktree is created
+at, and it's the base branch the PR targets. A branch that doesn't exist fails immediately with
+the list of branches that do.
 
 Two things that must line up outside this tool, or a run will fail in ways it can't fix for you:
 
@@ -152,8 +170,7 @@ Two things that must line up outside this tool, or a run will fail in ways it ca
   git credentials on the machine must be able to clone the URL in `repos:` (use a credential
   helper or `gh auth setup-git` — never put a token in the clone URL, it gets stored in plaintext).
 - **The target repo needs a `.trident/build.yaml`** declaring its ecosystem and toolchain
-  version. Without it the run escalates rather than guessing. Its declared Java/Node major
-  version must have a matching entry in `config.yml`'s `toolchains:` map.
+  version. Without it the run escalates rather than guessing.
 
 ### Logging
 
@@ -191,16 +208,20 @@ two on first live run:
 
 Suggested order for the first live run, so a failure tells you exactly which layer broke:
 
+With `NEXUSFIX_APP_ID` and `NEXUSFIX_BRANCH` in `.env`, you can drop the flags entirely:
+
 ```bash
 # 1. IQ connectivity + mirroring + worktree only — no agent, no mutations.
-nexusfix run --app-id <your-app> --branch main --dry-run --mock-agent
+nexusfix run --dry-run --mock-agent
 
 # 2. Add the real Copilot agent and a real build, still no push/PR.
-nexusfix run --app-id <your-app> --branch main --dry-run
+nexusfix run --dry-run
 
 # 3. Full run, stopping for your approval before the PR is opened.
-nexusfix run --app-id <your-app> --branch main --gate pre-pr
+nexusfix run --gate pre-pr
 ```
+
+(Or pass `--app-id <app> --branch <branch>` explicitly on any of them to override `.env`.)
 
 Step 1 exercises `HTTPIQClient` (the first unverified piece); step 2 adds `CopilotCLIAgent` (the
 second). Add `-v` to any of them to see full request/response bodies on the console.

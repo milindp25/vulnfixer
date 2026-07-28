@@ -39,8 +39,26 @@ def resolve_branch_commit_sha(mirror_path: Path, branch: str) -> str:
     """
     proc = subprocess.run(
         ["git", "rev-parse", f"origin/{branch}"], cwd=str(mirror_path),
-        capture_output=True, encoding="utf-8", check=True,
+        capture_output=True, encoding="utf-8",
     )
+    if proc.returncode != 0:
+        # A typo'd or non-existent branch is the likeliest cause, and git's own message
+        # ("unknown revision or path not in the working tree") does not make that obvious.
+        available = subprocess.run(
+            ["git", "branch", "--remotes", "--format=%(refname:short)"],
+            cwd=str(mirror_path), capture_output=True, encoding="utf-8",
+        )
+        names = [
+            stripped.removeprefix("origin/")
+            for stripped in (line.strip() for line in (available.stdout or "").splitlines())
+            # Skip the bare `origin` entry, which is the origin/HEAD symref, not a branch.
+            if stripped.startswith("origin/") and "->" not in stripped
+        ]
+        raise ValueError(
+            f"branch {branch!r} does not exist on the remote. "
+            + (f"Available branches: {', '.join(sorted(names))}." if names else
+               "No remote branches were found — check the repo URL and your git credentials.")
+        )
     return proc.stdout.strip()
 
 

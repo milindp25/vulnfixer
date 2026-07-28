@@ -10,6 +10,14 @@ from dotenv import load_dotenv
 
 @dataclass(frozen=True)
 class Secrets:
+    """Everything read from the environment (.env), secret or not.
+
+    `default_app_id` / `default_branch` are not secrets — they live here because this is
+    the single place environment variables are read. They let you put the app and branch
+    you usually work on in .env instead of retyping them on every invocation; an explicit
+    CLI flag still wins.
+    """
+
     iq_url: str
     iq_username: str
     iq_password: str
@@ -17,6 +25,8 @@ class Secrets:
     github_api_url: str
     workspace_root: Path
     agent_backend: str | None
+    default_app_id: str | None
+    default_branch: str | None
 
 
 @dataclass(frozen=True)
@@ -42,6 +52,8 @@ def load_secrets(env_file: Path | None = None) -> Secrets:
         github_api_url=os.environ.get("NEXUSFIX_GITHUB_API_URL", "https://api.github.com"),
         workspace_root=Path(workspace_root),
         agent_backend=os.environ.get("NEXUSFIX_AGENT_BACKEND"),
+        default_app_id=os.environ.get("NEXUSFIX_APP_ID") or None,
+        default_branch=os.environ.get("NEXUSFIX_BRANCH") or None,
     )
 
 

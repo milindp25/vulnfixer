@@ -2,8 +2,16 @@ __pycache__/
 *.pyc
 .venv/
 *.egg-info/
+.pytest_cache/
+/dist/
 .env
 state/*.db
 runs/
 tests/fixtures/demo_gradle_repo/.gradle/
 tests/fixtures/demo_gradle_repo/build/
+
+# Machine/user-local, not project config — was previously excluded only via this
+# machine's global git excludesfile (~/.config/git/ignore), which isn't portable
+# to a fresh clone on another machine.
+.claude/
+.DS_Store

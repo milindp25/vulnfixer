@@ -48,21 +48,44 @@ public-only repo, `public_repo` is sufficient.
 
 ## Setup
 
+**macOS / Linux:**
+
 ```bash
 git clone <this-repo> && cd vulnfixer
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 ```
 
-This installs the package in editable mode and gives you the `nexusfix` CLI at `.venv/bin/nexusfix`.
+**Windows (PowerShell):**
+
+```powershell
+git clone <this-repo>; cd vulnfixer
+py -m venv .venv
+.venv\Scripts\pip install -e ".[dev]"
+```
+
+Note that creating a venv does **not** activate it, and Windows puts executables in
+`.venv\Scripts\`, not `.venv/bin/`. Calling the venv's `pip` by path as above sidesteps
+activation entirely. If you'd rather activate it (so plain `pip`, `pytest` and `nexusfix` work),
+run `.venv\Scripts\Activate.ps1` first — your prompt gains a `(.venv)` prefix. Should PowerShell
+refuse with *"running scripts is disabled on this system"*, either stick with the by-path form or
+allow it for that session with
+`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`. In `cmd.exe` the activation script
+is `.venv\Scripts\activate.bat`; in Git Bash, `source .venv/Scripts/activate`.
+
+This installs the package in editable mode and gives you the `nexusfix` CLI — at
+`.venv/bin/nexusfix` on macOS/Linux, `.venv\Scripts\nexusfix.exe` on Windows.
 
 ## Running the tests
 
 ```bash
-.venv/bin/pytest tests/unit -v          # fast, fully offline, 204 tests, no external deps
+.venv/bin/pytest tests/unit -v          # fast, fully offline, no external deps
 .venv/bin/pytest tests -v -m slow       # + 2 tests that run a real Gradle build (~5-10s)
 .venv/bin/pytest tests -v               # everything
 ```
+
+On Windows, swap the prefix: `.venv\Scripts\pytest tests\unit -v` (or just `pytest tests/unit -v`
+once activated).
 
 The "slow" tests copy the fixture at `tests/fixtures/demo_gradle_repo/` into a temp directory,
 `git init` it fresh, and run the real `Orchestrator` against it with real `git`/`./gradlew`
@@ -76,6 +99,12 @@ Gradle 8.10 into `~/.gradle` via the wrapper; subsequent runs are fast.
 .venv/bin/nexusfix run --app-id <app-id> --branch <branch-name> [--gate none|pre-pr|pre-push] [--dry-run] [--mock-agent]
 .venv/bin/nexusfix gc [--older-than-days 7]
 ```
+
+(Windows: `.venv\Scripts\nexusfix ...`, or just `nexusfix ...` with the venv activated. The rest
+of this README writes it as plain `nexusfix` for brevity.)
+
+Run it from the directory holding your `config.yml` and `.env` — both are read from the current
+working directory.
 
 `nexusfix run` performs the full pipeline against your live Nexus IQ instance and your real
 repository, once `.env` and `config.yml` are filled in:

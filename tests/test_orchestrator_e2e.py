@@ -81,16 +81,12 @@ def repo(tmp_path):
 
 
 def _finding() -> Finding:
-    # NOTE on current_version: Maven publishes this artifact as "1.9", but
-    # `iq.filter.classify_bump` only understands three-component semver and routes
-    # anything else to `escalate` as UNKNOWN — which would make the agent never run.
-    # "1.9.0" is used here so this test exercises the actionable/FIXED path; the
-    # two-component gap is a real filter limitation, not something to paper over
-    # inside the orchestrator.
+    # Real Maven version string for this artifact (two-component, no patch) —
+    # classify_bump now treats the missing patch as 0, so this reaches actionable.
     return Finding(
         component=COMPONENT,
         package_url=PACKAGE_URL,
-        current_version="1.9.0",
+        current_version="1.9",
         target_version="1.10.0",
         remediation_type="next-non-failing-with-dependencies",
         is_direct=True,

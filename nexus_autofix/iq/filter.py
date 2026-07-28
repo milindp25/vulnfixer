@@ -6,7 +6,10 @@ from enum import Enum
 
 from nexus_autofix.iq.models import Finding
 
-_SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
+# Patch component is optional: Maven artifacts routinely publish two-component
+# versions ("1.9", not "1.9.0") — requiring three components would escalate
+# every one of those as UNKNOWN and never let the agent attempt a real fix.
+_SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?")
 
 
 class BumpSize(str, Enum):
@@ -21,8 +24,8 @@ def classify_bump(current: str, target: str) -> BumpSize:
     tgt = _SEMVER_RE.match(target or "")
     if not cur or not tgt:
         return BumpSize.UNKNOWN
-    cur_major, cur_minor, _ = (int(x) for x in cur.groups())
-    tgt_major, tgt_minor, _ = (int(x) for x in tgt.groups())
+    cur_major, cur_minor = int(cur.group(1)), int(cur.group(2))
+    tgt_major, tgt_minor = int(tgt.group(1)), int(tgt.group(2))
     if tgt_major != cur_major:
         return BumpSize.MAJOR
     if tgt_minor != cur_minor:

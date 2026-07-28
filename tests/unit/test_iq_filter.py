@@ -19,6 +19,21 @@ def test_classify_bump_patch():
     assert classify_bump("1.2.3", "1.2.5") == BumpSize.PATCH
 
 
+def test_classify_bump_handles_two_component_maven_versions():
+    # Maven routinely publishes "1.9" rather than "1.9.0" — the missing patch
+    # component must not make this UNKNOWN (which would escalate every routine
+    # two-component bump instead of letting the agent attempt it).
+    assert classify_bump("1.9", "1.10.0") == BumpSize.MINOR
+    assert classify_bump("1.9", "1.9.5") == BumpSize.PATCH
+    assert classify_bump("1.9", "2.0") == BumpSize.MAJOR
+
+
+def test_two_component_version_finding_is_actionable_not_unknown():
+    result = filter_findings([_finding(current_version="1.9", target_version="1.10.0")], suppressed_components=set())
+    assert len(result.actionable) == 1
+    assert not result.escalate
+
+
 def test_classify_bump_minor():
     assert classify_bump("1.2.3", "1.3.0") == BumpSize.MINOR
 

@@ -20,6 +20,9 @@ nexusfix = "nexus_autofix.cli:main"
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.pytest.ini_options]
+markers = ["slow: exercises a real Gradle build via subprocess"]
+
 [tool.setuptools.packages.find]
 include = ["nexus_autofix*"]
 

@@ -5,3 +5,5 @@ __pycache__/
 .env
 state/*.db
 runs/
+tests/fixtures/demo_gradle_repo/.gradle/
+tests/fixtures/demo_gradle_repo/build/

@@ -1,0 +1,4 @@
+strategy:
+  uses: gradle
+  with:
+    java-version: "21"

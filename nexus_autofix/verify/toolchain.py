@@ -29,6 +29,18 @@ def resolve_java_env(
             f"configured majors: {sorted(java_map)}. This is a hard failure before the "
             f"agent is invoked — add the path to config.yml's toolchains.java map."
         )
+    # A configured-but-wrong path (typo, moved install) must fail here, at the
+    # pre-agent safety gate, not later as a confusing build error.
+    if not Path(home).is_dir():
+        raise MissingToolchainError(
+            f"configured Java {major} path does not exist: {home} "
+            f"(declared {declared_version}). Fix config.yml's toolchains.java map."
+        )
+    if not (Path(home) / "bin" / "java").exists():
+        raise MissingToolchainError(
+            f"configured Java {major} path is not a JDK: {home} has no bin/java "
+            f"(declared {declared_version}). Fix config.yml's toolchains.java map."
+        )
     env = dict(base_env if base_env is not None else os.environ)
     java_home = str(Path(home))
     env["JAVA_HOME"] = java_home
@@ -46,6 +58,11 @@ def resolve_node_env(
             f"no Node {major} toolchain configured (declared {declared_version}); "
             f"configured majors: {sorted(node_map)}. This is a hard failure before the "
             f"agent is invoked — add the path to config.yml's toolchains.node map."
+        )
+    if not Path(node_dir).is_dir():
+        raise MissingToolchainError(
+            f"configured Node {major} path does not exist: {node_dir} "
+            f"(declared {declared_version}). Fix config.yml's toolchains.node map."
         )
     env = dict(base_env if base_env is not None else os.environ)
     env["PATH"] = str(Path(node_dir)) + os.pathsep + env.get("PATH", "")

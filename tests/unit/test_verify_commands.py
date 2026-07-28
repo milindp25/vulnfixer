@@ -37,6 +37,22 @@ def test_run_command_captures_failure(tmp_path):
     assert result.returncode == 1
 
 
+def test_missing_executable_becomes_a_normal_failure_not_an_exception(tmp_path):
+    env = {"PATH": os.environ.get("PATH", "")}
+    result = run_command(["definitely-not-a-real-command-xyz"], tmp_path, env, 10)
+    assert result.success is False
+    assert result.returncode == 127
+    assert "command not found" in result.stderr
+
+
+def test_timeout_becomes_a_normal_failure_not_an_exception(tmp_path):
+    env = {"PATH": os.environ.get("PATH", "")}
+    result = run_command(["python3", "-c", "import time; time.sleep(30)"], tmp_path, env, 1)
+    assert result.success is False
+    assert result.returncode == 124
+    assert "[TIMEOUT after 1s]" in result.stderr
+
+
 def test_tail_returns_last_n_lines(tmp_path):
     env = {"PATH": os.environ.get("PATH", "")}
     script = "for i in range(300): print(i)"

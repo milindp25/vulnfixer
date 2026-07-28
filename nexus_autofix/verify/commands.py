@@ -65,15 +65,37 @@ DEPENDENCY_DIAGNOSTIC_COMMANDS: dict[str, Callable[[Path], list[str]]] = {
 }
 
 
+def _as_text(stream: str | bytes | None) -> str:
+    """TimeoutExpired's captured output is str or bytes depending on how the child
+    was configured and how far it got; normalize both."""
+    if stream is None:
+        return ""
+    if isinstance(stream, str):
+        return stream
+    return stream.decode("utf-8", errors="replace")
+
+
 def run_command(args: list[str], cwd: Path, env: dict[str, str], timeout_seconds: int) -> CommandResult:
-    proc = subprocess.run(
-        args,
-        cwd=str(cwd),
-        env=env,
-        capture_output=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout_seconds,
-        shell=False,
-    )
+    # A missing executable or an over-long build is a normal, retryable build
+    # failure -- the retry-prompt machinery can act on it. Letting either escape as
+    # an exception would instead tear down the whole run.
+    try:
+        proc = subprocess.run(
+            args,
+            cwd=str(cwd),
+            env=env,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            shell=False,
+        )
+    except FileNotFoundError as exc:
+        return CommandResult(returncode=127, stdout="", stderr=f"command not found: {exc}")
+    except subprocess.TimeoutExpired as exc:
+        return CommandResult(
+            returncode=124,
+            stdout=_as_text(exc.stdout),
+            stderr=_as_text(exc.stderr) + f"\n[TIMEOUT after {exc.timeout}s]",
+        )
     return CommandResult(returncode=proc.returncode, stdout=proc.stdout or "", stderr=proc.stderr or "")

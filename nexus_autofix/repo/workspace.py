@@ -12,6 +12,38 @@ class Worktree:
     branch: str
 
 
+def clone_or_update_mirror(repo_url: str, mirror_path: Path) -> None:
+    """Clone repo_url into mirror_path if absent, else fetch it up to date.
+
+    The `HEAD` check covers a bare mirror; `.git` covers a normal clone.
+    """
+    if (mirror_path / ".git").exists() or (mirror_path / "HEAD").exists():
+        subprocess.run(
+            ["git", "fetch", "--all", "--prune"], cwd=str(mirror_path),
+            check=True, capture_output=True, encoding="utf-8",
+        )
+    else:
+        mirror_path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "clone", repo_url, str(mirror_path)],
+            check=True, capture_output=True, encoding="utf-8",
+        )
+
+
+def resolve_branch_commit_sha(mirror_path: Path, branch: str) -> str:
+    """Resolve a branch name in the mirror to the sha of its remote-tracking ref.
+
+    Deliberately resolves `origin/<branch>` rather than `<branch>`: the local branch in
+    a mirror can lag behind what was just fetched. Call `clone_or_update_mirror` first
+    so the remote-tracking ref is current.
+    """
+    proc = subprocess.run(
+        ["git", "rev-parse", f"origin/{branch}"], cwd=str(mirror_path),
+        capture_output=True, encoding="utf-8", check=True,
+    )
+    return proc.stdout.strip()
+
+
 def create_worktree(mirror_path: Path, run_dir: Path, commit_sha: str, branch: str) -> Worktree:
     wt_path = run_dir / "wt"
     subprocess.run(

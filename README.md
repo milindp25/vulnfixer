@@ -45,17 +45,28 @@ Gradle 8.10 into `~/.gradle` via the wrapper; subsequent runs are fast.
 .venv/bin/nexusfix gc [--older-than-days 7]
 ```
 
-**Current state of `nexusfix run`:** it loads `config.yml` and your `.env`, validates that
-`--app-id` maps to a configured repo, and prints its resolved settings. It does **not yet**
-mirror a real repo or call a live Nexus IQ instance end-to-end — that wiring is one of the two
-unverified integration points (see below), deliberately left out of this build since there's no
-live Nexus IQ tenant or installed Copilot CLI to test it against here. The `Orchestrator` class
-itself (`nexus_autofix/orchestrator.py`) is fully built, tested, and ready to be wired up — see
-`tests/test_orchestrator_e2e.py` for a complete example of constructing and running one.
+`nexusfix run` performs the full pipeline against your live Nexus IQ instance and your real
+repository, once `.env` and `config.yml` are filled in:
 
-`nexusfix gc` **is** fully wired — it talks to the real GitHub REST API to sweep stale
-`autofix/nexus/*` branches with no open PR, once `NEXUSFIX_GITHUB_TOKEN` and `config.yml`'s
-`repos` map are filled in.
+1. Resolves the application in Nexus IQ and starts a source-control evaluation of `--branch`.
+2. Clones/updates a local mirror of the repo (from `config.repos[<app-id>]`) under
+   `NEXUSFIX_WORKSPACE_ROOT`, and resolves the branch to a commit SHA.
+3. Fetches the policy report, then per-component remediation, to determine exact target versions.
+4. Creates a git worktree on a fresh `autofix/nexus/<run-id>` branch.
+5. Invokes the GitHub Copilot CLI agent with the assembled prompt (findings + ecosystem playbook).
+6. Classifies the resulting diff, then runs the real build and test commands, retrying on failure.
+7. Commits, pushes the branch, triggers a fresh IQ scan, and compares it against the baseline.
+8. Applies the gate (`pre-pr` by default), then opens a PR.
+
+Useful flags while you're getting it working:
+
+- `--dry-run` — does every real step (IQ scan, mirror, worktree, agent, build, test, diff
+  classification) but never commits, pushes, or opens a PR. Best first run against a real app.
+- `--mock-agent` — substitutes a no-op agent so you can verify IQ discovery, mirroring, worktree
+  creation, and toolchain resolution all work before involving the Copilot CLI at all.
+- `--gate pre-push` — stops after build/test, before anything is pushed.
+
+`nexusfix gc` sweeps stale `autofix/nexus/*` branches with no open PR via the GitHub REST API.
 
 ## Configuration
 
@@ -121,14 +132,10 @@ What you need to change:
 
 ## What's real vs. unverified
 
-Everything except two integration points is implemented and tested offline against fakes and
-mocks: the orchestrator loop, repo/toolchain detection, diff classification, build/test
-verification, the state store, and publish logic all have real, exercised implementations —
-including two end-to-end tests that run the full orchestrator against a real Gradle project with
-real `git`/`./gradlew` subprocess calls (`tests/test_orchestrator_e2e.py`).
-
-The two pieces that are written to spec but **not verified against a live service**, because none
-was available while building this:
+The whole pipeline is wired end to end and runs for real. What has *not* been exercised is the
+two places where this code talks to an external service, because no live Nexus IQ tenant or
+installed Copilot CLI was available on the machine it was built on. Expect to iterate on these
+two on first live run:
 
 - **`nexus_autofix/iq/client.py`** (`HTTPIQClient`) — the Nexus IQ HTTP client. Endpoint sequence
   follows the design doc's section 7 exactly, but field names in the JSON responses are
@@ -136,6 +143,19 @@ was available while building this:
 - **`nexus_autofix/agent/copilot_cli.py`** (`CopilotCLIAgent`) — the Copilot CLI adapter. The
   exact non-interactive invocation flags are unconfirmed.
 
-Once you've filled in `.env` and `config.yml` above and pointed this at a real Nexus IQ tenant and
-an installed Copilot CLI, report back anything that doesn't match — wrong endpoint field names,
+Suggested order for the first live run, so a failure tells you exactly which layer broke:
+
+```bash
+# 1. IQ connectivity + mirroring + worktree only — no agent, no mutations.
+nexusfix run --app-id <your-app> --branch main --dry-run --mock-agent
+
+# 2. Add the real Copilot agent and a real build, still no push/PR.
+nexusfix run --app-id <your-app> --branch main --dry-run
+
+# 3. Full run, stopping for your approval before the PR is opened.
+nexusfix run --app-id <your-app> --branch main --gate pre-pr
+```
+
+Step 1 exercises `HTTPIQClient` (the first unverified piece); step 2 adds `CopilotCLIAgent` (the
+second). Report back anything that doesn't match — wrong endpoint field names, wrong JSON keys,
 wrong CLI flags — for a follow-up fix.

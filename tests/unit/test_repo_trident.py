@@ -52,3 +52,10 @@ def test_tolerates_top_level_version_keys_alongside_with_block(tmp_path):
     )
     strategies = parse_trident_build_yaml(path)
     assert strategies[0].toolchain == {"java": "17.0.1"}
+
+
+def test_missing_strategy_key_raises_value_error_not_key_error(tmp_path):
+    path = tmp_path / "build.yaml"
+    path.write_text("not_strategy: true\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="strategy"):
+        parse_trident_build_yaml(path)

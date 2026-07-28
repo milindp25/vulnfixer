@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Nexus IQ client. `HTTPIQClient` follows the endpoint sequence in the design doc
 (section 7) exactly, but the precise JSON field names have NOT been verified
@@ -7,6 +5,8 @@ against a live IQ instance in this environment — the design doc's own open
 items list this ("pull the OpenAPI spec... rather than inferring field names").
 Test against a real tenant and adjust field lookups here if they don't match.
 """
+
+from __future__ import annotations
 
 import time
 from dataclasses import dataclass

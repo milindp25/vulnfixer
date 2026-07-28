@@ -139,8 +139,14 @@ non-secret project decisions go in `config.yml` (checked into this repo).
 Copy the template and fill in real values:
 
 ```bash
-cp .env.example .env
+cp .env.example .env          # Windows: Copy-Item .env.example .env
 ```
+
+Only two filenames are read, and only from the directory you run `nexusfix` in:
+**`.env.local`** first, then **`.env`**. Values are merged per-variable, so `.env.local` is for
+machine-specific overrides without touching `.env`. Anything already exported in your shell wins
+over both. Parent directories are deliberately *not* searched — otherwise a stray `.env` above
+the repo could silently supply credentials. Both files are gitignored.
 
 | Variable | Required for | Meaning |
 |---|---|---|

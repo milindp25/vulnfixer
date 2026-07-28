@@ -41,8 +41,31 @@ class ProjectConfig:
     repos: dict[str, str]
 
 
+#: Loaded in this order, from the current working directory only. Earlier entries win,
+#: because python-dotenv is told not to overwrite an already-set variable.
+ENV_FILENAMES = (".env.local", ".env")
+
+
 def load_secrets(env_file: Path | None = None) -> Secrets:
-    load_dotenv(dotenv_path=env_file)
+    """Read configuration from the environment, seeded from `.env.local` then `.env`.
+
+    Precedence, highest first: a variable already exported in your shell, then
+    `.env.local`, then `.env`. `.env.local` is the place for machine-specific overrides
+    you don't want to disturb `.env` for.
+
+    Only the current working directory is searched — deliberately not python-dotenv's
+    default, which walks up parent directories and can silently pick up a `.env` from
+    somewhere above the repo. `config.yml` is read from the CWD too, so both now behave
+    the same way. Pass `env_file` to load one specific file instead.
+    """
+    if env_file is not None:
+        load_dotenv(dotenv_path=env_file)
+    else:
+        for filename in ENV_FILENAMES:
+            candidate = Path.cwd() / filename
+            if candidate.is_file():
+                load_dotenv(dotenv_path=candidate, override=False)
+
     workspace_root = os.environ.get("NEXUSFIX_WORKSPACE_ROOT", str(Path.home() / "nfx"))
     return Secrets(
         iq_url=os.environ.get("NEXUSFIX_IQ_URL", ""),

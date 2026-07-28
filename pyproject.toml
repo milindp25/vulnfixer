@@ -1,0 +1,27 @@
+[project]
+name = "nexus-autofix"
+version = "0.1.0"
+description = "Automated remediation of Nexus IQ dependency vulnerabilities via an AI coding agent, with deterministic verification."
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+nexusfix = "nexus_autofix.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["nexus_autofix*"]
+
+[tool.setuptools.package-data]
+nexus_autofix = ["playbooks/*.md", "agent_instructions.md"]

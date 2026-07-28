@@ -1,0 +1,11 @@
+subprocess_timeout_seconds: 1800
+max_attempts: 2
+poll_timeout_seconds: 900
+default_stage_id: build
+default_gate: pre-pr
+toolchains:
+  java:
+    "21": /usr/bin  # placeholder — set to a real JAVA_HOME-style dir per major version
+  node:
+    "24": /usr/local/bin  # placeholder — set to a real Node install dir per major version
+repos: {}

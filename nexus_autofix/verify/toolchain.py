@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -28,6 +29,18 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 _VERSION_DETECT_TIMEOUT_SECONDS = 30
+
+# Windows JDK/Node binaries carry a .exe suffix; probing for a bare "java" there
+# reports a perfectly good JDK as missing.
+_EXE = ".exe" if platform.system() == "Windows" else ""
+
+
+def _java_binary(java_home: Path) -> Path:
+    return java_home / "bin" / f"java{_EXE}"
+
+
+def _node_binary(node_dir: Path) -> Path:
+    return node_dir / f"node{_EXE}"
 
 
 class MissingToolchainError(RuntimeError):
@@ -47,7 +60,7 @@ def _detect_java_major(java_home: Path) -> str | None:
     """Best-effort major version of a JDK, via `java -version`. None if undetectable."""
     try:
         proc = subprocess.run(
-            [str(java_home / "bin" / "java"), "-version"],
+            [str(_java_binary(java_home)), "-version"],
             capture_output=True, encoding="utf-8", errors="replace",
             timeout=_VERSION_DETECT_TIMEOUT_SECONDS,
         )
@@ -67,7 +80,7 @@ def _detect_java_major(java_home: Path) -> str | None:
 def _detect_node_major(node_dir: Path) -> str | None:
     try:
         proc = subprocess.run(
-            [str(node_dir / "node"), "--version"],
+            [str(_node_binary(node_dir)), "--version"],
             capture_output=True, encoding="utf-8", errors="replace",
             timeout=_VERSION_DETECT_TIMEOUT_SECONDS,
         )
@@ -98,7 +111,7 @@ def _warn_on_version_mismatch(tool: str, declared_major: str, found_major: str |
 def _ambient_java_home(env: dict[str, str]) -> Path | None:
     """JAVA_HOME if usable, else derive it from `java` on PATH."""
     java_home = env.get("JAVA_HOME")
-    if java_home and (Path(java_home) / "bin" / "java").exists():
+    if java_home and _java_binary(Path(java_home)).exists():
         return Path(java_home)
     java_on_path = shutil.which("java", path=env.get("PATH"))
     if java_on_path:
@@ -106,7 +119,7 @@ def _ambient_java_home(env: dict[str, str]) -> Path | None:
         # platforms put on PATH, so we land on the real JDK rather than /usr/bin.
         resolved = Path(java_on_path).resolve()
         candidate = resolved.parent.parent
-        if (candidate / "bin" / "java").exists():
+        if _java_binary(candidate).exists():
             return candidate
         return resolved.parent.parent
     return None
@@ -127,7 +140,7 @@ def resolve_java_env(
                 f"configured Java {major} path does not exist: {home} "
                 f"(declared {declared_version}). Fix config.yml's toolchains.java map."
             )
-        if not (Path(home) / "bin" / "java").exists():
+        if not _java_binary(Path(home)).exists():
             raise MissingToolchainError(
                 f"configured Java {major} path is not a JDK: {home} has no bin/java "
                 f"(declared {declared_version}). Fix config.yml's toolchains.java map."

@@ -3,14 +3,39 @@ import platform
 from pathlib import Path
 
 from nexus_autofix.verify.commands import (
-    BUILD_COMMANDS, TEST_COMMANDS, INSTALL_COMMANDS, CommandResult, run_command,
+    BUILD_COMMANDS, TEST_COMMANDS, INSTALL_COMMANDS, CommandResult, resolve_program, run_command,
 )
 
 
-def test_gradle_build_command_uses_frozen_x_test():
-    cmd = BUILD_COMMANDS["gradle"](Path("."))
+def test_gradle_build_command_uses_frozen_x_test(tmp_path):
+    cmd = BUILD_COMMANDS["gradle"](tmp_path)
     assert cmd[1:] == ["clean", "build", "-x", "test"]
-    assert cmd[0] in {"./gradlew", "gradlew.bat"}
+    # Wrapper is addressed by full path inside the repo, with the platform's suffix —
+    # a bare/relative name is resolved against the wrong directory on Windows.
+    expected = "gradlew.bat" if platform.system() == "Windows" else "gradlew"
+    assert cmd[0] == str(tmp_path / expected)
+
+
+def test_maven_build_command_uses_the_repo_local_wrapper(tmp_path):
+    cmd = BUILD_COMMANDS["maven"](tmp_path)
+    expected = "mvnw.cmd" if platform.system() == "Windows" else "mvnw"
+    assert cmd[0] == str(tmp_path / expected)
+
+
+def test_resolve_program_leaves_explicit_paths_untouched(tmp_path):
+    explicit = str(tmp_path / "gradlew")
+    assert resolve_program(explicit) == explicit
+
+
+def test_resolve_program_finds_a_bare_name_on_path(tmp_path):
+    tool = tmp_path / "faketool"
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    tool.chmod(0o755)
+    assert resolve_program("faketool", {"PATH": str(tmp_path)}) == str(tool)
+
+
+def test_resolve_program_returns_the_name_unchanged_when_not_found():
+    assert resolve_program("definitely-not-installed-xyz", {"PATH": ""}) == "definitely-not-installed-xyz"
 
 
 def test_npm_verify_uses_ci_never_install():

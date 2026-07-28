@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nexus_autofix.agent.base import AgentResult, changed_files_from_git
+from nexus_autofix.verify.commands import resolve_program
 
 
 @dataclass
@@ -25,8 +26,11 @@ class CopilotCLIAgent:
     timeout_seconds: int = 1800
 
     def run(self, prompt: str, worktree: Path) -> AgentResult:
+        # On Windows the CLI is a `copilot.cmd` shim that CreateProcess won't find by
+        # bare name; resolve_program applies PATHEXT. No-op elsewhere.
+        command = [resolve_program(self.command[0]), *self.command[1:]]
         proc = subprocess.run(
-            self.command, input=prompt, cwd=str(worktree), capture_output=True,
+            command, input=prompt, cwd=str(worktree), capture_output=True,
             encoding="utf-8", errors="replace", timeout=self.timeout_seconds, shell=False,
         )
         changed = changed_files_from_git(worktree)

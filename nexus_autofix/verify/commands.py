@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import platform
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,25 +28,50 @@ class CommandResult:
         return "\n".join(combined[-lines:])
 
 
-def _gradle_executable() -> str:
-    return "gradlew.bat" if platform.system() == "Windows" else "./gradlew"
+_IS_WINDOWS = platform.system() == "Windows"
 
 
-def _maven_executable() -> str:
-    return "mvnw.cmd" if platform.system() == "Windows" else "./mvnw"
+def _gradle_executable(root: Path) -> str:
+    """Absolute path to the repo's Gradle wrapper.
+
+    Absolute rather than "./gradlew" because on Windows CreateProcess resolves a bare
+    or relative program name against the *parent* process's directory, not the `cwd=`
+    handed to the child — so a relative wrapper name can silently fail to be found.
+    """
+    return str(root / ("gradlew.bat" if _IS_WINDOWS else "gradlew"))
+
+
+def _maven_executable(root: Path) -> str:
+    return str(root / ("mvnw.cmd" if _IS_WINDOWS else "mvnw"))
+
+
+def resolve_program(program: str, env: dict[str, str] | None = None) -> str:
+    """Resolve a bare program name to a full path, honouring Windows' PATHEXT.
+
+    On Windows, npm/yarn/pnpm/copilot are installed as `.cmd` shims. `subprocess` with
+    `shell=False` calls CreateProcess, which does NOT apply PATHEXT, so `["npm", "ci"]`
+    raises FileNotFoundError even though npm works fine in the terminal. `shutil.which`
+    does apply PATHEXT, and the resolved `...\\npm.cmd` executes correctly.
+
+    Programs given as an explicit path are returned untouched.
+    """
+    if os.sep in program or (os.altsep and os.altsep in program):
+        return program
+    search_path = (env or {}).get("PATH") or os.environ.get("PATH")
+    return shutil.which(program, path=search_path) or program
 
 
 BUILD_COMMANDS: dict[str, Callable[[Path], list[str]]] = {
-    "gradle": lambda root: [_gradle_executable(), "clean", "build", "-x", "test"],
-    "maven": lambda root: [_maven_executable(), "-DskipTests", "clean", "package"],
+    "gradle": lambda root: [_gradle_executable(root), "clean", "build", "-x", "test"],
+    "maven": lambda root: [_maven_executable(root), "-DskipTests", "clean", "package"],
     "npm": lambda root: ["npm", "ci"],
     "yarn": lambda root: ["yarn", "install", "--frozen-lockfile"],
     "pnpm": lambda root: ["pnpm", "install", "--frozen-lockfile"],
 }
 
 TEST_COMMANDS: dict[str, Callable[[Path], list[str]]] = {
-    "gradle": lambda root: [_gradle_executable(), "test"],
-    "maven": lambda root: [_maven_executable(), "test"],
+    "gradle": lambda root: [_gradle_executable(root), "test"],
+    "maven": lambda root: [_maven_executable(root), "test"],
     "npm": lambda root: ["npm", "test"],
     "yarn": lambda root: ["yarn", "test"],
     "pnpm": lambda root: ["pnpm", "test"],
@@ -60,8 +87,8 @@ INSTALL_COMMANDS: dict[str, Callable[[Path], list[str]]] = {
 }
 
 DEPENDENCY_DIAGNOSTIC_COMMANDS: dict[str, Callable[[Path], list[str]]] = {
-    "gradle": lambda root: [_gradle_executable(), "dependencies", "--configuration", "runtimeClasspath"],
-    "maven": lambda root: [_maven_executable(), "dependency:tree", "-Dverbose"],
+    "gradle": lambda root: [_gradle_executable(root), "dependencies", "--configuration", "runtimeClasspath"],
+    "maven": lambda root: [_maven_executable(root), "dependency:tree", "-Dverbose"],
 }
 
 
@@ -76,6 +103,9 @@ def _as_text(stream: str | bytes | None) -> str:
 
 
 def run_command(args: list[str], cwd: Path, env: dict[str, str], timeout_seconds: int) -> CommandResult:
+    # Resolve the program against PATH (and PATHEXT on Windows) so `.cmd` shims like
+    # npm/yarn/pnpm are found; a no-op for the wrapper paths, which are already absolute.
+    args = [resolve_program(args[0], env), *args[1:]] if args else args
     # A missing executable or an over-long build is a normal, retryable build
     # failure -- the retry-prompt machinery can act on it. Letting either escape as
     # an exception would instead tear down the whole run.

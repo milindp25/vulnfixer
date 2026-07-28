@@ -10,9 +10,28 @@ for the build plan.
 ## Prerequisites
 
 - Python 3.11+ (this repo was built and tested on 3.13)
-- git
+- git, already authenticated for the repos you'll point it at
 - For the "slow" test suite only: Java 17+ on `PATH` (used to run a real Gradle build against a
   test fixture). Gradle itself is not required — the fixture ships its own wrapper.
+
+Runs on **macOS, Linux and Windows**. Windows specifics are handled: the Gradle/Maven wrappers
+resolve to `gradlew.bat` / `mvnw.cmd` by full path, `npm`/`yarn`/`pnpm`/`copilot` are resolved
+through `PATHEXT` (they're `.cmd` shims, which `subprocess` can't find by bare name), JDK/Node
+probing looks for `java.exe` / `node.exe`, and `PATH` is joined with the platform separator.
+Keep the workspace root short (the `~/nfx` default is fine) to stay clear of the 260-character
+path limit, or enable long paths with `git config --global core.longpaths true`.
+
+### How it reaches GitHub
+
+Two different mechanisms, which matters for credentials:
+
+| Operation | Mechanism | Auth |
+|---|---|---|
+| clone, fetch, worktree, commit, push | the **`git` CLI** | whatever git already uses — Git Credential Manager on Windows, keychain/helper on macOS. Nothing extra to configure |
+| opening the PR, `nexusfix gc` | **GitHub REST API** | `NEXUSFIX_GITHUB_TOKEN` |
+
+So if `git clone <your-repo>` works in your terminal, the repo half works here too. The token is
+only needed for the PR (and `gc`) — which is why `--dry-run` doesn't require one.
 
 ## Setup
 

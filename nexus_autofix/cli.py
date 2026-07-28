@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from datetime import date
@@ -13,6 +14,7 @@ from nexus_autofix.config import ProjectConfig, Secrets, load_project_config, lo
 from nexus_autofix.iq import remediation as remediation_mod
 from nexus_autofix.iq.client import HTTPIQClient
 from nexus_autofix.iq.models import Finding
+from nexus_autofix.logging_setup import configure_logging
 from nexus_autofix.orchestrator import Orchestrator, RunConfig, RunResult
 from nexus_autofix.publish import branch as branch_mod
 from nexus_autofix.publish.gate import present_pre_pr_gate
@@ -26,6 +28,8 @@ from nexus_autofix.repo.workspace import (
     resolve_branch_commit_sha,
 )
 from nexus_autofix.state.store import StateStore
+
+log = logging.getLogger(__name__)
 
 _PURL_RE = re.compile(r"^pkg:(?P<type>[^/]+)/(?P<rest>[^@]+)@(?P<version>.+)$")
 
@@ -132,6 +136,7 @@ def perform_run(
     mock_agent: bool,
     config: ProjectConfig,
     secrets: Secrets,
+    verbose: bool = False,
 ) -> RunResult:
     """Run the full pipeline against a live Nexus IQ instance and a real repo.
 
@@ -141,37 +146,52 @@ def perform_run(
     repo_url = config.repos[app_id]
     workspace_root = secrets.workspace_root
 
+    # Set the run up first so every log line below — including the IQ calls — lands in
+    # this run's own log file, which doubles as its audit trail.
+    run_id = str(uuid.uuid4())
+    run_dir = workspace_root / "runs" / run_id
+    fix_branch = f"autofix/nexus/{run_id}"
+    log_file = configure_logging(run_dir / "nexusfix.log", verbose=verbose)
+
+    log.info("run %s starting: app_id=%s branch=%s gate=%s dry_run=%s mock_agent=%s",
+             run_id, app_id, branch, gate, dry_run, mock_agent)
+    log.info("full DEBUG log (incl. every IQ request/response body): %s", log_file)
+
     iq_client = HTTPIQClient(secrets.iq_url, secrets.iq_username, secrets.iq_password)
 
-    click.echo(f"resolving Nexus IQ application {app_id!r}...")
+    log.info("resolving Nexus IQ application %r at %s", app_id, secrets.iq_url)
     internal_id = iq_client.resolve_application_internal_id(app_id)
 
     mirror_path = workspace_root / "mirrors" / app_id
-    click.echo(f"mirroring {repo_url} -> {mirror_path}")
+    log.info("mirroring %s -> %s", repo_url, mirror_path)
     clone_or_update_mirror(repo_url, mirror_path)
     commit_sha = resolve_branch_commit_sha(mirror_path, branch)
-    click.echo(f"{branch} resolves to {commit_sha}")
+    log.info("branch %s resolves to %s", branch, commit_sha)
 
-    click.echo(f"starting Nexus IQ source control evaluation (stage={config.default_stage_id})...")
+    log.info("starting Nexus IQ source control evaluation (stage=%s)", config.default_stage_id)
     status_url = iq_client.start_source_control_evaluation(
         internal_id, branch, commit_sha, config.default_stage_id
     )
     baseline_report_id = iq_client.poll_evaluation(status_url, config.poll_timeout_seconds)
     violations = iq_client.fetch_policy_report(app_id, baseline_report_id)
-    click.echo(f"baseline report {baseline_report_id}: {len(violations)} policy violation(s)")
+    log.info("baseline report %s: %d policy violation(s)", baseline_report_id, len(violations))
 
+    log.info("fetching remediation advice for %d component(s)...", len(violations))
     findings = findings_from_policy_report(
         iq_client, internal_id, violations, config.default_stage_id
     )
+    for f in findings:
+        log.info("  finding: %s %s -> %s (%s)",
+                 f.component, f.current_version, f.target_version or "no remediation",
+                 f.remediation_type or "n/a")
 
-    run_id = str(uuid.uuid4())
-    run_dir = workspace_root / "runs" / run_id
-    fix_branch = f"autofix/nexus/{run_id}"
-    click.echo(f"run {run_id}: creating worktree on {fix_branch}")
+    log.info("creating worktree on %s at %s", fix_branch, run_dir)
     worktree = create_worktree(mirror_path, run_dir, commit_sha, fix_branch)
 
     descriptor = read_descriptor(worktree.path / ".security-fix.yml")
     suppressed = unexpired_suppressions(descriptor, date.today())
+    if suppressed:
+        log.info("repo .security-fix.yml suppresses: %s", ", ".join(sorted(suppressed)))
 
     # MockAgent is a scripted test double: it must be told exactly which file and contents
     # to write, so it cannot generically "fix" an arbitrary repo. NO_CHANGES makes
@@ -179,6 +199,7 @@ def perform_run(
     # invocation (IQ discovery, mirror, worktree, toolchain resolution) without needing
     # the Copilot CLI installed.
     agent = MockAgent(mode=MockMode.NO_CHANGES) if mock_agent else CopilotCLIAgent()
+    log.info("agent backend: %s", type(agent).__name__)
 
     run_config = RunConfig(
         app_id=app_id,
@@ -193,7 +214,7 @@ def perform_run(
 
     def rescan_fn(rc: RunConfig, wt: Path) -> str:
         """Scan the pushed fix branch and return its report id for baseline comparison."""
-        click.echo(f"rescanning {rc.branch} in Nexus IQ...")
+        log.info("rescanning %s in Nexus IQ...", rc.branch)
         rescan_status_url = iq_client.start_source_control_evaluation(
             internal_id, rc.branch, current_commit_sha(wt), config.default_stage_id
         )
@@ -201,6 +222,7 @@ def perform_run(
 
     def open_pr_fn(wt: Path, head_branch: str) -> None:
         owner, repo = _owner_repo_from_url(repo_url)
+        log.info("opening PR on %s/%s: %s -> %s", owner, repo, head_branch, branch)
         pull_request = open_pull_request(
             api_url=secrets.github_api_url,
             token=secrets.github_token,
@@ -220,7 +242,7 @@ def perform_run(
                 f"findings cleared with no new findings introduced."
             ),
         )
-        click.echo(f"opened PR #{pull_request.number}: {pull_request.url}")
+        log.info("opened PR #%s: %s", pull_request.number, pull_request.url)
 
     state_store = StateStore(workspace_root / "state" / "nexusfix.db")
 
@@ -229,9 +251,9 @@ def perform_run(
         # Exercise everything real (IQ, worktree, agent, build, test, diff classification)
         # but never mutate the remote.
         orchestrator_kwargs = {
-            "commit_fn": lambda wt, message: click.echo(f"[dry-run] would commit: {message}"),
-            "push_fn": lambda wt, b: click.echo(f"[dry-run] would push {b}"),
-            "delete_remote_branch_fn": lambda wt, b: click.echo(f"[dry-run] would delete {b}"),
+            "commit_fn": lambda wt, message: log.info("[dry-run] would commit: %s", message),
+            "push_fn": lambda wt, b: log.info("[dry-run] would push %s", b),
+            "delete_remote_branch_fn": lambda wt, b: log.info("[dry-run] would delete remote %s", b),
         }
 
     orchestrator = Orchestrator(
@@ -240,7 +262,7 @@ def perform_run(
         state_store=state_store,
         rescan_fn=rescan_fn,
         open_pr_fn=(
-            (lambda wt, b: click.echo(f"[dry-run] would open a PR for {b}"))
+            (lambda wt, b: log.info("[dry-run] would open a PR for %s", b))
             if dry_run
             else open_pr_fn
         ),
@@ -249,7 +271,7 @@ def perform_run(
     )
 
     try:
-        return orchestrator.run(
+        result = orchestrator.run(
             run_config=run_config,
             worktree=worktree.path,
             commit_sha=commit_sha,
@@ -258,10 +280,18 @@ def perform_run(
             baseline_report_id=baseline_report_id,
             suppressed_components=suppressed,
         )
+        log.info("run %s finished with outcome %s", run_id, result.outcome.value)
+        for note in result.notes:
+            log.info("  note: %s", note)
+        return result
+    except Exception:
+        log.exception("run %s failed with an unhandled exception", run_id)
+        raise
     finally:
         if not remove_worktree(mirror_path, worktree):
-            click.echo(f"warning: could not clean up worktree at {worktree.path}", err=True)
+            log.warning("could not clean up worktree at %s", worktree.path)
         state_store.close()
+        log.info("full log for this run: %s", log_file)
 
 
 def _echo_findings(label: str, findings: list[Finding]) -> None:
@@ -279,7 +309,11 @@ def _echo_findings(label: str, findings: list[Finding]) -> None:
 @click.option("--gate", default=None, type=click.Choice(["none", "pre-pr", "pre-push"]))
 @click.option("--dry-run", is_flag=True, default=False)
 @click.option("--mock-agent", is_flag=True, default=False)
-def run_command(app_id: str, branch: str, gate: str | None, dry_run: bool, mock_agent: bool):
+@click.option("-v", "--verbose", is_flag=True, default=False,
+              help="Echo full IQ request/response bodies to the console (always in the log file).")
+def run_command(
+    app_id: str, branch: str, gate: str | None, dry_run: bool, mock_agent: bool, verbose: bool
+):
     """
     Discovers findings from Nexus IQ, runs the agent loop, and (unless --dry-run) opens a PR.
 
@@ -297,11 +331,6 @@ def run_command(app_id: str, branch: str, gate: str | None, dry_run: bool, mock_
         )
     _require_secrets(secrets, dry_run)
 
-    click.echo(
-        f"nexus-autofix run: app_id={app_id} branch={branch} gate={effective_gate} "
-        f"dry_run={dry_run} mock_agent={mock_agent} iq_url={secrets.iq_url}"
-    )
-
     result = perform_run(
         app_id=app_id,
         branch=branch,
@@ -310,6 +339,7 @@ def run_command(app_id: str, branch: str, gate: str | None, dry_run: bool, mock_
         mock_agent=mock_agent,
         config=config,
         secrets=secrets,
+        verbose=verbose,
     )
 
     click.echo(f"\noutcome: {result.outcome.value}  (run {result.run_id})")

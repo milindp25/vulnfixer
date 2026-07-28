@@ -1,8 +1,16 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nexus_autofix.iq.client import FakeIQClient, HTTPIQClient, PolicyViolation, RemediationResponse, VersionChange
+from nexus_autofix.iq.client import (
+    FakeIQClient,
+    HTTPIQClient,
+    IQEvaluationError,
+    IQTimeoutError,
+    PolicyViolation,
+    RemediationResponse,
+    VersionChange,
+)
 
 
 def test_fake_iq_client_returns_configured_violations():
@@ -71,3 +79,87 @@ def test_http_client_fetch_policy_report_uses_json_accept_header():
 
     assert violations[0].component == "y"
     assert session.get.call_args.kwargs["headers"] == {"Accept": "application/json"}
+
+
+# --- poll_evaluation: HTTP 200 does not mean "done" -------------------------
+# IQ returns 200 with a pending status while the scan runs, so these cover the
+# state machine that decides keep-polling / fail-fast / done.
+
+
+def _status_response(payload: dict) -> MagicMock:
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = payload
+    return resp
+
+
+def test_poll_evaluation_keeps_polling_while_status_is_pending():
+    session = MagicMock()
+    session.get.side_effect = [
+        _status_response({"status": "PENDING"}),
+        _status_response({"status": "IN_PROGRESS"}),
+        _status_response({"status": "COMPLETED", "reportDataUrl": "api/v2/reports/abc123"}),
+    ]
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    with patch("nexus_autofix.iq.client.time.sleep"):
+        report_id = client.poll_evaluation("/status/1", timeout_seconds=60)
+
+    assert report_id == "abc123"
+    assert session.get.call_count == 3
+
+
+def test_poll_evaluation_treats_a_200_with_no_status_field_as_still_pending():
+    session = MagicMock()
+    session.get.side_effect = [
+        _status_response({}),
+        _status_response({"reportHtmlUrl": "https://iq.example.com/ui/links/report/xyz789"}),
+    ]
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    with patch("nexus_autofix.iq.client.time.sleep"):
+        assert client.poll_evaluation("/status/1", timeout_seconds=60) == "xyz789"
+
+
+def test_poll_evaluation_fails_fast_on_a_failed_status_rather_than_burning_the_timeout():
+    session = MagicMock()
+    session.get.return_value = _status_response(
+        {"status": "FAILED", "errorMessage": "scan could not resolve dependencies"}
+    )
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    with patch("nexus_autofix.iq.client.time.sleep") as sleep:
+        with pytest.raises(IQEvaluationError, match="scan could not resolve dependencies"):
+            client.poll_evaluation("/status/1", timeout_seconds=900)
+
+    assert session.get.call_count == 1, "should not poll again after a terminal failure"
+    sleep.assert_not_called()
+
+
+def test_poll_evaluation_reports_terminal_success_with_no_report_url():
+    session = MagicMock()
+    session.get.return_value = _status_response({"status": "COMPLETED", "somethingElse": 1})
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    with patch("nexus_autofix.iq.client.time.sleep"):
+        with pytest.raises(IQEvaluationError, match="no recognisable report"):
+            client.poll_evaluation("/status/1", timeout_seconds=60)
+
+
+def test_poll_evaluation_timeout_message_includes_the_last_status():
+    session = MagicMock()
+    session.get.return_value = _status_response({"status": "RUNNING"})
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    with patch("nexus_autofix.iq.client.time.sleep"):
+        with pytest.raises(IQTimeoutError, match="RUNNING"):
+            client.poll_evaluation("/status/1", timeout_seconds=0.05)
+
+
+def test_start_source_control_evaluation_errors_clearly_without_a_status_url():
+    session = MagicMock()
+    session.post.return_value = _status_response({"unexpected": "shape"})
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    with pytest.raises(IQEvaluationError, match="statusUrl"):
+        client.start_source_control_evaluation("id", "main", "sha", "build")

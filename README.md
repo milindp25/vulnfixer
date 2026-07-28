@@ -130,6 +130,48 @@ What you need to change:
    lets `--app-id` on the CLI and `nexusfix gc` resolve which repo to act on.
 3. The five top-level numeric/string settings have sane defaults and usually don't need changing.
 
+### Everything you must supply — checklist
+
+Nothing else is required; if a run fails for any *other* missing input, that's a bug worth
+reporting.
+
+| # | Input | Where | Notes |
+|---|---|---|---|
+| 1 | Nexus IQ base URL | `.env` → `NEXUSFIX_IQ_URL` | e.g. `https://iq.corp.example.com` |
+| 2 | IQ user token ID | `.env` → `NEXUSFIX_IQ_USERNAME` | IQ user tokens are an ID/secret pair |
+| 3 | IQ user token secret | `.env` → `NEXUSFIX_IQ_PASSWORD` | |
+| 4 | GitHub/GHES token | `.env` → `NEXUSFIX_GITHUB_TOKEN` | needs repo + PR scope. Not required with `--dry-run` |
+| 5 | GHES API URL | `.env` → `NEXUSFIX_GITHUB_API_URL` | **only** if not github.com |
+| 6 | app-id → repo URL | `config.yml` → `repos:` | the app-id must be the IQ **public** application ID |
+| 7 | Real JDK/Node paths | `config.yml` → `toolchains:` | one entry per major version your repos declare |
+| 8 | `--app-id` and `--branch` | CLI args | branch is the one to scan and to target the PR at |
+
+Two things that must line up outside this tool, or a run will fail in ways it can't fix for you:
+
+- **The IQ application must already exist** with the public ID you pass as `--app-id`, and the
+  git credentials on the machine must be able to clone the URL in `repos:` (use a credential
+  helper or `gh auth setup-git` — never put a token in the clone URL, it gets stored in plaintext).
+- **The target repo needs a `.trident/build.yaml`** declaring its ecosystem and toolchain
+  version. Without it the run escalates rather than guessing. Its declared Java/Node major
+  version must have a matching entry in `config.yml`'s `toolchains:` map.
+
+### Logging
+
+Every run writes two streams:
+
+- **Console** — INFO: each IQ call, poll attempts with status, findings and their target
+  versions, build/test progress, and the final outcome. `-v/--verbose` adds full bodies here too.
+- **File** — always DEBUG, at `<workspace_root>/runs/<run-id>/nexusfix.log`: every IQ request URL,
+  request body, response status, timing, and **full response body**. On any HTTP error the
+  response body is logged at ERROR (IQ puts the real reason there).
+
+Credentials are never logged — they're passed via the HTTP auth mechanism, and request headers
+are deliberately never written to the log.
+
+That DEBUG log is the fastest way to resolve the unverified-field-names caveat below: if
+something parses as empty when the IQ UI clearly shows findings, the real JSON shape is sitting
+in that file.
+
 ## What's real vs. unverified
 
 The whole pipeline is wired end to end and runs for real. What has *not* been exercised is the
@@ -139,7 +181,11 @@ two on first live run:
 
 - **`nexus_autofix/iq/client.py`** (`HTTPIQClient`) — the Nexus IQ HTTP client. Endpoint sequence
   follows the design doc's section 7 exactly, but field names in the JSON responses are
-  best-effort guesses.
+  best-effort guesses. Polling is written defensively: an HTTP 200 with a pending status keeps
+  polling, a terminal failure status fails immediately with IQ's own error message rather than
+  burning the full timeout, and several plausible spellings of the status field and its values
+  are matched case-insensitively. If your instance uses different names, the DEBUG log shows the
+  real response and the fix is a one-line change to `_STATUS_FIELDS` / the status value sets.
 - **`nexus_autofix/agent/copilot_cli.py`** (`CopilotCLIAgent`) — the Copilot CLI adapter. The
   exact non-interactive invocation flags are unconfirmed.
 
@@ -157,5 +203,8 @@ nexusfix run --app-id <your-app> --branch main --gate pre-pr
 ```
 
 Step 1 exercises `HTTPIQClient` (the first unverified piece); step 2 adds `CopilotCLIAgent` (the
-second). Report back anything that doesn't match — wrong endpoint field names, wrong JSON keys,
-wrong CLI flags — for a follow-up fix.
+second). Add `-v` to any of them to see full request/response bodies on the console.
+
+If something breaks, send the run's log file (`<workspace_root>/runs/<run-id>/nexusfix.log`) —
+it contains the actual URLs, status codes, and response bodies, which is enough to correct the
+field mappings or CLI flags without guessing.

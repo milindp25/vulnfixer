@@ -47,14 +47,14 @@ def load_secrets(env_file: Path | None = None) -> Secrets:
 
 def load_project_config(path: Path) -> ProjectConfig:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    toolchains = data.get("toolchains", {})
+    toolchains = data.get("toolchains") or {}
     return ProjectConfig(
         subprocess_timeout_seconds=data.get("subprocess_timeout_seconds", 1800),
         max_attempts=data.get("max_attempts", 2),
         poll_timeout_seconds=data.get("poll_timeout_seconds", 900),
         default_stage_id=data.get("default_stage_id", "build"),
         default_gate=data.get("default_gate", "pre-pr"),
-        java_toolchains={str(k): v for k, v in toolchains.get("java", {}).items()},
-        node_toolchains={str(k): v for k, v in toolchains.get("node", {}).items()},
-        repos=data.get("repos", {}),
+        java_toolchains={str(k): v for k, v in (toolchains.get("java") or {}).items()},
+        node_toolchains={str(k): v for k, v in (toolchains.get("node") or {}).items()},
+        repos=data.get("repos") or {},
     )

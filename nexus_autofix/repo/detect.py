@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,10 +18,12 @@ class RepoHygieneError(ValueError):
 
 
 def _walk(root: Path):
-    for path in root.rglob("*"):
-        if any(part in SKIP_DIRS for part in path.relative_to(root).parts[:-1]):
-            continue
-        yield path
+    """Yields every non-skipped file under root, pruning SKIP_DIRS so large trees
+    (node_modules, build output) are never descended into in the first place."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for filename in filenames:
+            yield Path(dirpath) / filename
 
 
 def detect_js_manager(root: Path) -> DetectedEcosystem | None:

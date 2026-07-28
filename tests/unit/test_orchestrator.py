@@ -102,7 +102,7 @@ class FixingAgent:
     def __init__(self):
         self.calls = 0
 
-    def run(self, prompt, worktree):
+    def run(self, prompt, worktree, env=None):
         self.calls += 1
         (worktree / "build.gradle").write_text(
             f"dependencies {{ implementation 'x:x:1.0.{self.calls}' }}\n", encoding="utf-8"
@@ -151,7 +151,7 @@ def test_unusable_toolchain_escalates_before_agent_runs(tmp_path):
     agent_called = {"count": 0}
 
     class CountingAgent:
-        def run(self, prompt, worktree):
+        def run(self, prompt, worktree, env=None):
             agent_called["count"] += 1
             return AgentResult(changed_files=[], raw_output="")
 
@@ -248,7 +248,7 @@ def test_agent_exception_is_caught_too(tmp_path):
     store = StateStore(tmp_path / "state.db")
 
     class ExplodingAgent:
-        def run(self, prompt, worktree):
+        def run(self, prompt, worktree, env=None):
             raise RuntimeError("agent CLI crashed")
 
     orchestrator = _orchestrator(store, agent=ExplodingAgent())

@@ -29,7 +29,7 @@ class MockAgent:
     test_file_to_delete: str | None = None
     _attempt: int = field(default=0, init=False)
 
-    def run(self, prompt: str, worktree: Path) -> AgentResult:
+    def run(self, prompt: str, worktree: Path, env: dict[str, str] | None = None) -> AgentResult:
         self._attempt += 1
 
         if self.mode == MockMode.NO_CHANGES:

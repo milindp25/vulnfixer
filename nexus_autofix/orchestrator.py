@@ -201,7 +201,7 @@ class Orchestrator:
                     build_command=" ".join(build_cmd), test_command=" ".join(test_cmd),
                     actionable_findings=filtered.actionable, escalated_findings=filtered.escalate, retry=retry_context,
                 )
-                self._agent.run(prompt, worktree)
+                self._agent.run(prompt, worktree, env)
                 changed = changed_files_from_git(worktree)
 
                 if not changed:

@@ -13,7 +13,15 @@ class AgentResult:
 
 
 class AgentRunner(Protocol):
-    def run(self, prompt: str, worktree: Path) -> AgentResult: ...
+    def run(self, prompt: str, worktree: Path, env: dict[str, str] | None = None) -> AgentResult:
+        """Run the agent against the worktree.
+
+        `env` is the toolchain-resolved environment the orchestrator will also use to
+        build and test. The agent gets the same one so that when it runs the build
+        itself — which its instructions tell it to do — it sees the same JDK/Node the
+        verification step will, rather than whatever happens to be on the ambient PATH.
+        """
+        ...
 
 
 def changed_files_from_git(worktree: Path) -> list[str]:

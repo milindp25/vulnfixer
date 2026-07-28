@@ -33,6 +33,19 @@ Two different mechanisms, which matters for credentials:
 So if `git clone <your-repo>` works in your terminal, the repo half works here too. The token is
 only needed for the PR (and `gc`) — which is why `--dry-run` doesn't require one.
 
+#### Generating the token
+
+Settings → Developer settings → Personal access tokens → **Tokens (classic)** → Generate new
+token (classic). Tick **`repo`** — that single scope covers every call this tool makes (create a
+PR; and for `gc`: list branches, list open PRs, delete a ref). Nothing else is needed. For a
+public-only repo, `public_repo` is sufficient.
+
+- **Org with SAML SSO:** after creating the token, click **Configure SSO** next to it and
+  authorize your organisation. Without that, API calls fail with a **404** (not a 403), which
+  reads as "repo doesn't exist" and is easy to misdiagnose.
+- **If your org disallows classic tokens**, use a fine-grained token scoped to the repo with
+  **Contents: Read and write** and **Pull requests: Read and write**.
+
 ## Setup
 
 ```bash

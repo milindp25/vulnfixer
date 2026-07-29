@@ -7,7 +7,7 @@ from nexus_autofix.publish.branch import sweep_stale_branches
 def test_sweep_deletes_stale_branch_with_no_open_pr():
     old_date = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat().replace("+00:00", "Z")
 
-    def fake_get(url, headers=None, params=None, timeout=None):
+    def fake_get(url, headers=None, params=None, timeout=None, **kwargs):
         resp = MagicMock()
         resp.raise_for_status.return_value = None
         if url.endswith("/branches"):
@@ -33,7 +33,7 @@ def test_sweep_deletes_stale_branch_with_no_open_pr():
 def test_sweep_skips_branch_with_open_pr():
     old_date = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat().replace("+00:00", "Z")
 
-    def fake_get(url, headers=None, params=None, timeout=None):
+    def fake_get(url, headers=None, params=None, timeout=None, **kwargs):
         resp = MagicMock()
         resp.raise_for_status.return_value = None
         if url.endswith("/branches"):

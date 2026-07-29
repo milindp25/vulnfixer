@@ -16,6 +16,8 @@ from typing import Protocol
 
 import requests
 
+from nexus_autofix.http import make_session
+
 log = logging.getLogger(__name__)
 
 
@@ -116,7 +118,7 @@ class HTTPIQClient:
     ):
         self._base_url = base_url.rstrip("/")
         self._auth = (username, password)
-        self._session = session or requests.Session()
+        self._session = session or make_session()
         self._request_timeout = request_timeout_seconds
 
     # -- request plumbing -------------------------------------------------

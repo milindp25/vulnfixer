@@ -1,6 +1,9 @@
 import os
 
+import pytest
+
 from nexus_autofix.config import load_project_config, load_secrets
+from nexus_autofix.http import tls_verify
 
 
 def test_load_project_config_reads_toolchains_and_defaults(tmp_path):
@@ -75,3 +78,36 @@ def test_does_not_walk_up_to_a_parent_directory_dot_env(monkeypatch, tmp_path):
     child.mkdir()
     monkeypatch.chdir(child)
     assert load_secrets().iq_url == ""
+
+
+# --- TLS settings -----------------------------------------------------------
+
+
+def test_tls_verify_defaults_to_on(monkeypatch):
+    monkeypatch.delenv("NEXUSFIX_INSECURE_SKIP_TLS_VERIFY", raising=False)
+    monkeypatch.delenv("NEXUSFIX_CA_BUNDLE", raising=False)
+    assert tls_verify() is True
+
+
+def test_ca_bundle_is_used_when_set(monkeypatch):
+    monkeypatch.delenv("NEXUSFIX_INSECURE_SKIP_TLS_VERIFY", raising=False)
+    monkeypatch.setenv("NEXUSFIX_CA_BUNDLE", "/etc/ssl/corp-ca.pem")
+    assert tls_verify() == "/etc/ssl/corp-ca.pem"
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "on"])
+def test_insecure_flag_disables_verification(monkeypatch, value):
+    monkeypatch.setenv("NEXUSFIX_INSECURE_SKIP_TLS_VERIFY", value)
+    assert tls_verify() is False
+
+
+def test_insecure_flag_beats_a_ca_bundle(monkeypatch):
+    monkeypatch.setenv("NEXUSFIX_CA_BUNDLE", "/etc/ssl/corp-ca.pem")
+    monkeypatch.setenv("NEXUSFIX_INSECURE_SKIP_TLS_VERIFY", "true")
+    assert tls_verify() is False
+
+
+def test_a_non_truthy_value_does_not_disable_verification(monkeypatch):
+    monkeypatch.delenv("NEXUSFIX_CA_BUNDLE", raising=False)
+    monkeypatch.setenv("NEXUSFIX_INSECURE_SKIP_TLS_VERIFY", "false")
+    assert tls_verify() is True

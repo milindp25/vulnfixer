@@ -6,6 +6,8 @@ from pathlib import Path
 
 import requests
 
+from nexus_autofix.http import tls_verify
+
 BRANCH_PREFIX = "autofix/nexus/"
 
 
@@ -26,11 +28,11 @@ def delete_remote_branch(worktree: Path, remote: str, branch: str) -> None:
 def sweep_stale_branches(api_url: str, token: str, owner: str, repo: str, older_than_days: int) -> list[str]:
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
 
-    branches_resp = requests.get(f"{api_url}/repos/{owner}/{repo}/branches", headers=headers, timeout=30)
+    branches_resp = requests.get(f"{api_url}/repos/{owner}/{repo}/branches", headers=headers, timeout=30, verify=tls_verify())
     branches_resp.raise_for_status()
 
     open_prs_resp = requests.get(
-        f"{api_url}/repos/{owner}/{repo}/pulls", headers=headers, params={"state": "open"}, timeout=30
+        f"{api_url}/repos/{owner}/{repo}/pulls", headers=headers, params={"state": "open"}, timeout=30, verify=tls_verify()
     )
     open_prs_resp.raise_for_status()
     open_pr_branches = {pr["head"]["ref"] for pr in open_prs_resp.json()}
@@ -42,7 +44,7 @@ def sweep_stale_branches(api_url: str, token: str, owner: str, repo: str, older_
         name = branch["name"]
         if not name.startswith(BRANCH_PREFIX) or name in open_pr_branches:
             continue
-        commit_resp = requests.get(branch["commit"]["url"], headers=headers, timeout=30)
+        commit_resp = requests.get(branch["commit"]["url"], headers=headers, timeout=30, verify=tls_verify())
         commit_resp.raise_for_status()
         commit_date = datetime.fromisoformat(
             commit_resp.json()["commit"]["committer"]["date"].replace("Z", "+00:00")

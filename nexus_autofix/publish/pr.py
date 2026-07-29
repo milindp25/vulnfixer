@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import requests
 
+from nexus_autofix.http import tls_verify
+
 
 @dataclass(frozen=True)
 class PullRequest:
@@ -20,6 +22,7 @@ def open_pull_request(
         headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
         json={"title": title, "head": head_branch, "base": base_branch, "body": body},
         timeout=30,
+        verify=tls_verify(),
     )
     resp.raise_for_status()
     data = resp.json()

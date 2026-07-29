@@ -13,6 +13,7 @@ from nexus_autofix.agent.mock import MockAgent, MockMode
 from nexus_autofix.config import ProjectConfig, Secrets, load_project_config, load_secrets
 from nexus_autofix.iq import remediation as remediation_mod
 from nexus_autofix.iq.client import HTTPIQClient
+from nexus_autofix.http import try_enable_os_trust_store, warn_if_insecure
 from nexus_autofix.iq.models import Finding
 from nexus_autofix.logging_setup import configure_logging
 from nexus_autofix.orchestrator import Orchestrator, RunConfig, RunResult
@@ -156,6 +157,8 @@ def perform_run(
     log.info("run %s starting: app_id=%s branch=%s gate=%s dry_run=%s mock_agent=%s",
              run_id, app_id, branch, gate, dry_run, mock_agent)
     log.info("full DEBUG log (incl. every IQ request/response body): %s", log_file)
+    log.debug("TLS: OS trust store %s", try_enable_os_trust_store())
+    warn_if_insecure()
 
     iq_client = HTTPIQClient(secrets.iq_url, secrets.iq_username, secrets.iq_password)
 

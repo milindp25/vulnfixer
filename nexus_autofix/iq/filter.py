@@ -33,6 +33,40 @@ def classify_bump(current: str, target: str) -> BumpSize:
     return BumpSize.PATCH
 
 
+def _version_tuple(version: str) -> tuple[int, int, int] | None:
+    """(major, minor, patch) for ordering comparisons, or None if unparseable."""
+    match = _SEMVER_RE.match(version or "")
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+
+
+def is_a_real_upgrade(current: str, target: str) -> bool:
+    """Whether moving current -> target is actually an upgrade.
+
+    Nexus IQ answers a remediation request with the CURRENT version when no version
+    clears the violation — its way of saying "this cannot be fixed by bumping this
+    component", which is routine for a transitive dependency whose fix belongs in a
+    parent. Read naively that comes back as "upgrade postcss 8.5.10 to 8.5.10", and the
+    agent is handed a no-op it cannot satisfy.
+
+    A lower target is refused too: downgrading is explicitly prohibited for the agent,
+    and reaching a "clean" version by going backwards is not a fix anyone asked for.
+
+    Unparseable versions return True so the decision falls through to classify_bump,
+    which routes them to UNKNOWN and escalates — this function only rejects cases it can
+    positively order.
+    """
+    if not current or not target:
+        return False
+    if current == target:
+        return False
+    current_parts, target_parts = _version_tuple(current), _version_tuple(target)
+    if current_parts is None or target_parts is None:
+        return True
+    return target_parts > current_parts
+
+
 #: IQ threat levels run 0-10. Only levels ABOVE this are worth an automated fix — 8+ is
 #: what IQ labels Critical/Severe. Overridable via config.yml's `min_threat_level`.
 DEFAULT_MIN_THREAT_LEVEL = 8
@@ -72,6 +106,13 @@ def filter_findings(
             ignore.append(finding)
             continue
         if not finding.is_actionable:
+            escalate.append(finding)
+            continue
+        if not is_a_real_upgrade(finding.current_version, finding.target_version):
+            # IQ offered nothing better than what is already installed. Sending this to
+            # the agent asks it to change a version to itself; it would either do nothing
+            # (reported as NO_CHANGES, i.e. "the agent failed") or invent a version of its
+            # own choosing to look productive. A human needs to see it instead.
             escalate.append(finding)
             continue
         bump = classify_bump(finding.current_version, finding.target_version)

@@ -15,6 +15,7 @@ from nexus_autofix.agent.mock import MockAgent, MockMode
 from nexus_autofix.config import ProjectConfig, Secrets, load_project_config, load_secrets
 from nexus_autofix.iq import remediation as remediation_mod
 from nexus_autofix.iq.client import HTTPIQClient
+from nexus_autofix.iq.filter import is_a_real_upgrade
 from nexus_autofix.http import try_enable_os_trust_store, warn_if_insecure
 from nexus_autofix.iq.models import Finding
 from nexus_autofix.logging_setup import configure_logging
@@ -173,6 +174,28 @@ def findings_from_policy_report(
             )
             continue
         version_change = remediation_mod.select_target(remediation, v.component)
+        if version_change is not None and not is_a_real_upgrade(
+            getattr(v, "current_version", "") or purl_version(v.package_url),
+            version_change.version,
+        ):
+            # IQ returns the current version when nothing clears the violation. Say so
+            # plainly here — otherwise the finding reads as a fix that was skipped.
+            log.warning(
+                "  %s: IQ's best offer (%s, %s) is not an upgrade over the installed %s. "
+                "This usually means the violation cannot be cleared by bumping this "
+                "component — for a transitive dependency the fix belongs in a parent. "
+                "Escalating for manual review.",
+                v.component, version_change.version, version_change.change_type,
+                getattr(v, "current_version", "") or purl_version(v.package_url),
+            )
+            findings.append(
+                _finding_without_remediation(
+                    v,
+                    f"IQ offered {version_change.version}, which is not an upgrade over "
+                    f"{getattr(v, 'current_version', '') or purl_version(v.package_url)}",
+                )
+            )
+            continue
         findings.append(
             Finding(
                 component=v.component,

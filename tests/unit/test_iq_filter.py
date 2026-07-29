@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from nexus_autofix.iq.filter import BumpSize, classify_bump, filter_findings
+from nexus_autofix.iq.filter import (
+    BumpSize,
+    classify_bump,
+    filter_findings,
+    is_a_real_upgrade,
+)
 from nexus_autofix.iq.models import Finding
 
 
@@ -110,3 +115,57 @@ def test_an_empty_target_version_is_not_actionable():
     result = filter_findings([_finding(target_version="")], suppressed_components=set())
     assert len(result.escalate) == 1
     assert not result.actionable
+
+
+# --------------------------------------------------------------------------------------
+# IQ answers with the CURRENT version when nothing clears the violation. Observed live:
+# postcss 8.5.10 -> 8.5.10, svgo 4.0.1 -> 4.0.1, brace-expansion 5.0.7 -> 5.0.7. All three
+# were routed to the agent as upgrades, which is a no-op instruction.
+# --------------------------------------------------------------------------------------
+
+
+def test_a_target_equal_to_the_current_version_is_not_an_upgrade():
+    assert is_a_real_upgrade("8.5.10", "8.5.10") is False
+    assert is_a_real_upgrade("8.5.10", "8.5.18") is True
+
+
+def test_a_lower_target_is_not_an_upgrade():
+    # Downgrading is prohibited for the agent; a "clean" older version is not a fix.
+    assert is_a_real_upgrade("8.5.18", "8.5.10") is False
+    assert is_a_real_upgrade("2.0.0", "1.9.9") is False
+
+
+def test_two_component_versions_are_ordered_correctly():
+    assert is_a_real_upgrade("1.9", "1.10") is True
+    assert is_a_real_upgrade("1.10", "1.9") is False
+    assert is_a_real_upgrade("1.9", "1.9.0") is False, "1.9 and 1.9.0 are the same version"
+
+
+def test_unparseable_versions_fall_through_to_the_bump_classifier():
+    # Not rejected here — classify_bump routes them to UNKNOWN and escalates, which
+    # already carries the right meaning.
+    assert is_a_real_upgrade("latest", "1.2.3") is True
+
+
+def test_a_no_op_remediation_is_escalated_not_handed_to_the_agent():
+    # The live regression, end to end through the filter.
+    result = filter_findings(
+        [_finding(current_version="8.5.10", target_version="8.5.10")], suppressed_components=set()
+    )
+    assert len(result.escalate) == 1
+    assert not result.actionable, "the agent must never be asked to change a version to itself"
+
+
+def test_a_downgrade_is_escalated():
+    result = filter_findings(
+        [_finding(current_version="8.5.18", target_version="8.5.10")], suppressed_components=set()
+    )
+    assert len(result.escalate) == 1
+    assert not result.actionable
+
+
+def test_a_genuine_upgrade_is_still_actionable():
+    result = filter_findings(
+        [_finding(current_version="8.4.31", target_version="8.5.18")], suppressed_components=set()
+    )
+    assert len(result.actionable) == 1

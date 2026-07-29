@@ -3,8 +3,9 @@
 You are fixing dependency vulnerabilities in a repository. Follow these steps in order.
 Do not skip steps and do not invent your own. Every command prints JSON on stdout.
 
-Replace `nexusfix` below with the path to the executable if it is not on your PATH
-(on Windows, typically `.venv\Scripts\nexusfix.exe`).
+`nexusfix` below is shorthand. Use the exact path in `nexusfix_executable` from `run.json` —
+the bare name only resolves with the virtualenv activated, and on Windows the executable is
+`.venv\Scripts\nexusfix.exe`.
 
 ---
 

@@ -423,3 +423,44 @@ def test_a_missing_config_without_a_recorded_directory_still_explains(tmp_path, 
     monkeypatch.chdir(tmp_path)
     with pytest.raises(click.ClickException, match="holding config.yml"):
         cli_mod._config_for_run({})
+
+
+def test_the_printed_commands_use_the_resolved_executable(capsys):
+    # "nexusfix" only resolves with the venv activated; on Windows it is
+    # .venv\Scripts\nexusfix.exe. Printing the bare name makes the reader (or the agent)
+    # work that out, which costs a failed command first.
+    from nexus_autofix import cli as cli_mod
+
+    cli_mod._echo_next_steps(_discover_payload(
+        nexusfix_executable=r"C:\proj\.venv\Scripts\nexusfix.exe"
+    ))
+
+    err = capsys.readouterr().err
+    assert r"C:\proj\.venv\Scripts\nexusfix.exe check --run-id run-123" in err
+    assert r"C:\proj\.venv\Scripts\nexusfix.exe publish --run-id run-123" in err
+
+
+def test_the_printed_commands_fall_back_to_the_bare_name(capsys):
+    from nexus_autofix import cli as cli_mod
+
+    cli_mod._echo_next_steps(_discover_payload())
+
+    assert "nexusfix check --run-id run-123" in capsys.readouterr().err
+
+
+def test_the_resolved_executable_is_an_absolute_path_when_argv0_is_real(monkeypatch, tmp_path):
+    from nexus_autofix import cli as cli_mod
+
+    fake = tmp_path / "nexusfix"
+    fake.write_text("", encoding="utf-8")
+    monkeypatch.setattr(cli_mod.sys, "argv", [str(fake)])
+
+    assert cli_mod._this_executable() == str(fake.resolve())
+
+
+def test_the_resolved_executable_degrades_to_the_bare_name(monkeypatch):
+    # `python -m nexus_autofix.cli`, where argv[0] is not a file on disk.
+    from nexus_autofix import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod.sys, "argv", ["-m"])
+    assert cli_mod._this_executable() == "nexusfix"

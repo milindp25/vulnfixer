@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import uuid
 from dataclasses import asdict
 from datetime import date
@@ -43,6 +44,19 @@ from nexus_autofix.verify import rescan as rescan_mod
 log = logging.getLogger(__name__)
 
 _PURL_RE = re.compile(r"^pkg:(?P<type>[^/]+)/(?P<rest>[^@]+)@(?P<version>.+)$")
+
+
+def _this_executable() -> str:
+    """The nexusfix executable currently running, as an absolute path where possible.
+
+    argv[0] is the console-script wrapper, which is what a caller needs to invoke: the bare
+    name "nexusfix" only resolves with the virtualenv activated. Falls back to the bare
+    name if argv[0] is not a real file (running via `python -m`, for instance).
+    """
+    candidate = Path(sys.argv[0])
+    if candidate.is_file():
+        return str(candidate.resolve())
+    return "nexusfix"
 
 
 def _owner_repo_from_url(repo_url: str) -> tuple[str, str]:
@@ -638,6 +652,11 @@ def perform_discovery(
         # from here. Recorded because whoever runs them — typically an agent sitting in the
         # run directory — is not standing where `discover` was run.
         "run_commands_from": str(Path.cwd().resolve()),
+        # The literal executable that is running, so the follow-up commands can be copied
+        # verbatim. "nexusfix" is only on PATH with the venv activated; on Windows it is
+        # .venv\Scripts\nexusfix.exe, and an agent handed the bare name has to work that
+        # out for itself.
+        "nexusfix_executable": _this_executable(),
         # The findings go in run.json, not just on stdout. Whoever runs `discover` is often
         # not who does the editing: you run it, then hand a run_id to an agent in an editor
         # that never saw the stdout. Without them here its only options are to re-run
@@ -672,6 +691,7 @@ def _echo_next_steps(payload: dict) -> None:
     run_dir = payload.get("open_this_in_your_editor") or payload.get("run_dir") or ""
     run_id = payload.get("run_id", "")
     findings = payload.get("findings") or []
+    exe = payload.get("nexusfix_executable") or "nexusfix"
     actionable = [f for f in findings if f.get("actionable")]
     blocked = [f for f in findings if not f.get("actionable")]
 
@@ -729,8 +749,8 @@ def _echo_next_steps(payload: dict) -> None:
         "     (they read config.yml and .env from the current directory, so they will not",
         "      work from the run directory or from wt/):",
         "",
-        f"       nexusfix check --run-id {run_id}",
-        f"       nexusfix publish --run-id {run_id}",
+        f"       {exe} check --run-id {run_id}",
+        f"       {exe} publish --run-id {run_id}",
         "",
         "  Edit files in wt/ but leave them uncommitted — `nexusfix publish` commits, after",
         "  the build, the tests and the diff check have passed. Committing early is not fatal",

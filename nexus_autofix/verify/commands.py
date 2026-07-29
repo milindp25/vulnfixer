@@ -114,6 +114,13 @@ def run_command(args: list[str], cwd: Path, env: dict[str, str], timeout_seconds
     # `gradlew`/`npm` becomes an absolute .bat/.cmd path, and a wrong resolution is
     # otherwise invisible until the command mysteriously fails.
     log.info("exec: %s (cwd=%s)", " ".join(args), cwd)
+    # The child's output is captured, not streamed — `tail()` feeds the retry prompt and the
+    # verdict, so it has to be held rather than passed through. That means a long install or
+    # test run prints nothing for minutes and looks hung, so say so before going quiet.
+    log.info(
+        "  (output is captured, so nothing appears until this finishes — up to %ds. "
+        "Re-run with -v to see it.)", timeout_seconds,
+    )
     started = time.monotonic()
     # A missing executable or an over-long build is a normal, retryable build
     # failure -- the retry-prompt machinery can act on it. Letting either escape as

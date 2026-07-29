@@ -693,3 +693,35 @@ def test_a_change_type_with_an_unreadable_version_warns(caplog):
     assert result.version_changes[0].version == ""
     assert "no version this client could read" in caplog.text
     assert "next-no-violations" in caplog.text
+
+
+def test_the_raw_remediation_response_is_logged_next_to_what_was_parsed(caplog):
+    # This contract has been misread twice. Printing IQ's answer beside the parse makes a
+    # mismatch visible at the source instead of as a wrong version several steps later.
+    with caplog.at_level(logging.INFO):
+        _remediation_response({"remediation": {"versionChanges": [_VERSION_CHANGE]}})
+
+    assert "remediation for axios@1.0" in caplog.text
+    assert "[('next-no-violations', '8.5.18')]" in caplog.text
+    assert "postcss : 8.5.18" in caplog.text, "the raw body must be there to compare against"
+
+
+def test_a_target_echoing_the_requested_version_is_called_out(caplog):
+    # brace-expansion 5.0.7 -> 5.0.7 while IQ's UI offers 5.0.8. Ambiguous by nature:
+    # either IQ has no fix, or the target lives elsewhere in the payload. Say so.
+    echoed = {
+        "type": "next-no-violations",
+        "data": {"component": {
+            "packageUrl": "pkg:npm/axios@1.0",
+            "componentIdentifier": {
+                "format": "npm", "coordinates": {"packageId": "axios", "version": "1.0"},
+            },
+            "displayName": "axios : 1.0",
+        }},
+    }
+    with caplog.at_level(logging.WARNING):
+        result = _remediation_response({"remediation": {"versionChanges": [echoed]}})
+
+    assert result.version_changes[0].version == "1.0"
+    assert "the SAME version that was requested" in caplog.text
+    assert "reading the component it was asked about" in caplog.text

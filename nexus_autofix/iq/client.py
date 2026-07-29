@@ -570,6 +570,21 @@ class HTTPIQClient:
                 VersionChange(change_type=vc.get("type", ""), version=str(version))
             )
 
+        # The full body at INFO, always. This is the most contested contract in the tool
+        # and has now been misread twice; the responses are small (a real one measured
+        # 549 bytes) and gating means only a handful are fetched per run. Printing what
+        # IQ said next to what was parsed out of it makes a mismatch self-evident instead
+        # of something to be inferred from a wrong version downstream.
+        requested_version = (component_identifier or {}).get("coordinates", {}).get("version")
+        log.info(
+            "remediation for %s@%s -> parsed %s\n  raw response: %s",
+            (component_identifier or {}).get("coordinates", {}).get("packageId")
+            or (component_identifier or {}).get("coordinates", {}).get("artifactId")
+            or "component",
+            requested_version,
+            [(vc.change_type, vc.version) for vc in version_changes] or "nothing",
+            _truncate(body),
+        )
         if not version_changes and body:
             log.warning(
                 "remediation response parsed to zero version changes. If IQ did offer an "
@@ -582,6 +597,18 @@ class HTTPIQClient:
                 log.warning(
                     "remediation offered type(s) %s with no version this client could "
                     "read. Raw response:\n%s", missing, _truncate(body),
+                )
+            echoed = [vc.change_type for vc in version_changes if vc.version == requested_version]
+            if echoed:
+                # Either IQ genuinely has no upgrade, or the target is somewhere else in
+                # the payload and the current version is being read by mistake. Those look
+                # identical downstream, so say both are possible and show the evidence.
+                log.warning(
+                    "remediation type(s) %s came back at %s — the SAME version that was "
+                    "requested. Either IQ has no version that clears this, or the upgrade "
+                    "target sits elsewhere in the payload and this client is reading the "
+                    "component it was asked about. Compare against the raw response above.",
+                    echoed, requested_version,
                 )
         parent = remediation.get("parentRemediation") or {}
         return RemediationResponse(

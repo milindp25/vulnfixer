@@ -173,7 +173,10 @@ def findings_from_policy_report(
                 _finding_without_remediation(v, f"remediation lookup failed: {exc}")
             )
             continue
-        version_change = remediation_mod.select_target(remediation, v.component)
+        version_change = remediation_mod.select_target(
+            remediation, v.component,
+            getattr(v, "current_version", "") or purl_version(v.package_url),
+        )
         if version_change is not None and not is_a_real_upgrade(
             getattr(v, "current_version", "") or purl_version(v.package_url),
             version_change.version,

@@ -171,7 +171,7 @@ def findings_from_policy_report(
                 _finding_without_remediation(v, f"remediation lookup failed: {exc}")
             )
             continue
-        version_change = remediation_mod.select_target(remediation)
+        version_change = remediation_mod.select_target(remediation, v.component)
         findings.append(
             Finding(
                 component=v.component,

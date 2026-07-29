@@ -93,6 +93,18 @@ breaks — `check` and `publish` diff from the commit the worktree was created a
 the changes, so its own assurance is worth nothing — the verdict has to come from a real build
 and a real diff classification, not from anyone's say-so.
 
+**Which branches:** the branch you pass to `discover` (or `NEXUSFIX_BRANCH`) is used for
+everything, consistently. It's resolved to a commit SHA on the remote, that exact SHA is what
+Nexus IQ scans and what the worktree is created at, and it's the branch the PR **targets**. The
+fix goes on a fresh `autofix/nexus/<run-id>` branch, so the PR is:
+
+```
+autofix/nexus/<run-id>  ->  <the branch you passed>
+```
+
+Both are recorded in `run.json` as `fix_branch` and `base_branch`. A branch that doesn't exist
+fails immediately, listing the ones that do.
+
 ### The usual sequence
 
 | Step | Who does it | What happens |

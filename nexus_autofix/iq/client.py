@@ -1,9 +1,17 @@
 """
 Nexus IQ client. `HTTPIQClient` follows the endpoint sequence in the design doc
-(section 7) exactly, but the precise JSON field names have NOT been verified
-against a live IQ instance in this environment — the design doc's own open
-items list this ("pull the OpenAPI spec... rather than inferring field names").
-Test against a real tenant and adjust field lookups here if they don't match.
+(section 7). Field names were originally inferred rather than taken from the OpenAPI
+spec, so parts of this are still best-effort — but the following have now been
+CONFIRMED against a live instance and should not be "corrected" back:
+
+* ``sourceControlEvaluation`` takes only ``stageId`` and ``branchName``. It does not
+  want ``commitHash``, despite the design doc recommending pinning to a commit.
+* The ``statusUrl`` it returns has NO leading slash, so it must be normalised before
+  being joined to the base URL.
+
+Anything not listed above is still unverified; if a response parses as empty when the
+IQ UI clearly shows data, compare against the DEBUG log, which records full response
+bodies.
 """
 
 from __future__ import annotations
@@ -51,7 +59,7 @@ class RemediationResponse:
 class IQClient(Protocol):
     def resolve_application_internal_id(self, public_id: str) -> str: ...
     def start_source_control_evaluation(
-        self, internal_id: str, branch_name: str, commit_hash: str, stage_id: str
+        self, internal_id: str, branch_name: str, stage_id: str
     ) -> str: ...
     def poll_evaluation(self, status_url: str, timeout_seconds: int) -> str: ...
     def fetch_policy_report(self, public_id: str, report_id: str) -> list[PolicyViolation]: ...
@@ -179,11 +187,16 @@ class HTTPIQClient:
         return internal_id
 
     def start_source_control_evaluation(
-        self, internal_id: str, branch_name: str, commit_hash: str, stage_id: str
+        self, internal_id: str, branch_name: str, stage_id: str
     ) -> str:
+        # VERIFIED AGAINST A LIVE INSTANCE: the body carries only stageId and branchName.
+        # An earlier version also sent commitHash (the design doc recommends pinning the
+        # evaluation to a commit) but the real endpoint does not want it, so it is not sent.
+        # The commit sha is still resolved and used everywhere else — it pins the worktree
+        # and is recorded on the run.
         resp = self._post(
             f"{self._base_url}/api/v2/evaluation/applications/{internal_id}/sourceControlEvaluation",
-            json={"stageId": stage_id, "branchName": branch_name, "commitHash": commit_hash},
+            json={"stageId": stage_id, "branchName": branch_name},
         )
         body = resp.json()
         status_url = body.get("statusUrl")
@@ -192,7 +205,14 @@ class HTTPIQClient:
                 "IQ did not return a 'statusUrl' when starting the evaluation. "
                 f"Response body was: {_truncate(body)}"
             )
-        log.info("IQ evaluation started for branch %s @ %s; status url: %s", branch_name, commit_hash, status_url)
+        # VERIFIED AGAINST A LIVE INSTANCE: statusUrl comes back WITHOUT a leading slash
+        # (e.g. "api/v2/scan/applications/.../status/..."), so joining it straight onto the
+        # base URL produced "https://iq.example.comapi/v2/...". Normalising here rather than
+        # blindly prefixing keeps it correct if an instance ever returns the slash already,
+        # or returns an absolute URL.
+        if not status_url.startswith(("http://", "https://")):
+            status_url = "/" + status_url.lstrip("/")
+        log.info("IQ evaluation started for branch %s; status url: %s", branch_name, status_url)
         return status_url
 
     def poll_evaluation(self, status_url: str, timeout_seconds: int) -> str:
@@ -333,7 +353,7 @@ class FakeIQClient:
         return self.internal_id
 
     def start_source_control_evaluation(
-        self, internal_id: str, branch_name: str, commit_hash: str, stage_id: str
+        self, internal_id: str, branch_name: str, stage_id: str
     ) -> str:
         return self.status_url
 

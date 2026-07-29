@@ -173,7 +173,7 @@ def perform_run(
 
     log.info("starting Nexus IQ source control evaluation (stage=%s)", config.default_stage_id)
     status_url = iq_client.start_source_control_evaluation(
-        internal_id, branch, commit_sha, config.default_stage_id
+        internal_id, branch, config.default_stage_id
     )
     baseline_report_id = iq_client.poll_evaluation(status_url, config.poll_timeout_seconds)
     violations = iq_client.fetch_policy_report(app_id, baseline_report_id)
@@ -219,7 +219,7 @@ def perform_run(
         """Scan the pushed fix branch and return its report id for baseline comparison."""
         log.info("rescanning %s in Nexus IQ...", rc.branch)
         rescan_status_url = iq_client.start_source_control_evaluation(
-            internal_id, rc.branch, current_commit_sha(wt), config.default_stage_id
+            internal_id, rc.branch, config.default_stage_id
         )
         return iq_client.poll_evaluation(rescan_status_url, config.poll_timeout_seconds)
 

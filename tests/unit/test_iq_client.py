@@ -162,4 +162,63 @@ def test_start_source_control_evaluation_errors_clearly_without_a_status_url():
     client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
 
     with pytest.raises(IQEvaluationError, match="statusUrl"):
-        client.start_source_control_evaluation("id", "main", "sha", "build")
+        client.start_source_control_evaluation("id", "main", "build")
+
+
+# --- behaviours confirmed against a live Nexus IQ instance ------------------
+
+
+def test_start_evaluation_does_not_send_commit_hash():
+    # The live endpoint rejects/ignores commitHash; only stageId and branchName go in.
+    session = MagicMock()
+    session.post.return_value = _status_response({"statusUrl": "api/v2/scan/status/1"})
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    client.start_source_control_evaluation("internal-1", "main", "build")
+
+    assert session.post.call_args.kwargs["json"] == {"stageId": "build", "branchName": "main"}
+
+
+def test_status_url_without_a_leading_slash_is_normalised():
+    # Live IQ returns "api/v2/..." with no leading slash; joining it straight onto the
+    # base URL yielded "https://iq.example.comapi/v2/...".
+    session = MagicMock()
+    session.post.return_value = _status_response({"statusUrl": "api/v2/scan/status/1"})
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    assert client.start_source_control_evaluation("internal-1", "main", "build") == "/api/v2/scan/status/1"
+
+
+def test_status_url_that_already_has_a_slash_is_not_doubled():
+    session = MagicMock()
+    session.post.return_value = _status_response({"statusUrl": "/api/v2/scan/status/1"})
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    assert client.start_source_control_evaluation("internal-1", "main", "build") == "/api/v2/scan/status/1"
+
+
+def test_an_absolute_status_url_is_left_alone():
+    session = MagicMock()
+    session.post.return_value = _status_response({"statusUrl": "https://iq.example.com/api/v2/status/1"})
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    assert (
+        client.start_source_control_evaluation("internal-1", "main", "build")
+        == "https://iq.example.com/api/v2/status/1"
+    )
+
+
+def test_normalised_status_url_joins_onto_the_base_url_correctly():
+    """The end-to-end point of the fix: the polled URL must have exactly one slash."""
+    session = MagicMock()
+    session.post.return_value = _status_response({"statusUrl": "api/v2/scan/status/1"})
+    session.get.return_value = _status_response(
+        {"status": "COMPLETED", "reportDataUrl": "api/v2/reports/rep1"}
+    )
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    status_url = client.start_source_control_evaluation("internal-1", "main", "build")
+    with patch("nexus_autofix.iq.client.time.sleep"):
+        client.poll_evaluation(status_url, timeout_seconds=60)
+
+    assert session.get.call_args.args[0] == "https://iq.example.com/api/v2/scan/status/1"

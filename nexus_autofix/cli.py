@@ -703,6 +703,7 @@ def check_command(run_id: str, verbose: bool):
         node_toolchains=config.node_toolchains,
         timeout_seconds=config.subprocess_timeout_seconds,
         env=dict(os.environ),
+        base_ref=state["commit_sha"],
     )
     agent_api.write_verdict(run_dir, result)
     _agent_json(asdict(result))
@@ -746,7 +747,7 @@ def publish_command(run_id: str, dry_run: bool, verbose: bool):
     # Re-read the diff now, rather than trusting the verdict's copy: the worktree may have
     # been edited between check and publish, in which case what would be pushed is not
     # what was verified.
-    current = diff_mod.classify_diff(worktree)
+    current = diff_mod.classify_diff(worktree, state["commit_sha"])
     if sorted(current.changed_files) != sorted(verdict.get("changed_files", [])):
         raise click.ClickException(
             "the worktree changed since `check` ran — what would be published is not what "
@@ -770,10 +771,19 @@ def publish_command(run_id: str, dry_run: bool, verbose: bool):
 
     log.info("committing and pushing %s", fix_branch)
     subprocess.run(["git", "add", "-A"], cwd=str(worktree), check=True, capture_output=True)
-    subprocess.run(
+    # `git commit` exits non-zero when there is nothing staged, which is exactly what
+    # happens if the agent committed already despite the runbook. That is not an error —
+    # the changes are present either way, and they were verified against the run's base
+    # commit rather than HEAD, so the verdict still covers them.
+    committed = subprocess.run(
         ["git", "commit", "-m", "fix: remediate dependency vulnerabilities via nexus-autofix"],
-        cwd=str(worktree), check=True, capture_output=True,
+        cwd=str(worktree), capture_output=True, encoding="utf-8",
     )
+    if committed.returncode != 0:
+        if "nothing to commit" in (committed.stdout or "") + (committed.stderr or ""):
+            log.info("already committed by the agent — pushing what is on the branch")
+        else:
+            raise click.ClickException(f"git commit failed: {committed.stderr or committed.stdout}")
     branch_mod.push_branch(worktree, "origin", fix_branch)
 
     log.info("rescanning %s to confirm the findings actually cleared", fix_branch)

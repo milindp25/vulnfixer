@@ -157,18 +157,75 @@ run unattended at all, leaving an interactive agent as the only thing able to ed
 the same client, endpoints and parsing that `nexusfix run` uses. The agent runs these commands
 and reads their JSON.
 
+### Step by step
+
+**1. You run discover.** This is the only step that talks to Nexus IQ.
+
 ```bash
-nexusfix discover                     # IQ scan -> findings + a prepared worktree, as JSON
-#   ... the agent edits the worktree ...
+nexusfix discover
+```
+
+It prints, among other fields:
+
+```json
+{
+  "run_id": "a1b2c3d4-...",
+  "open_this_in_your_editor": "C:\\Users\\you\\nfx\\runs\\a1b2c3d4-...",
+  "runbook": "C:\\Users\\you\\nfx\\runs\\a1b2c3d4-...\\RUNBOOK.md",
+  "worktree": "C:\\Users\\you\\nfx\\runs\\a1b2c3d4-...\\wt",
+  "findings": [
+    { "component": "brace-expansion", "current_version": "5.0.7",
+      "target_version": "5.0.8", "remediation_type": "next-no-violations",
+      "threat_level": 9, "is_direct": false,
+      "pulled_in_by": ["pkg:npm/some-parent@1.2.3"], "actionable": true }
+  ]
+}
+```
+
+**Check `target_version` before going further.** It must be genuinely newer than
+`current_version`. If it is not, stop — the log holds IQ's raw response for that component.
+
+**2. Open the run directory** — not this repo:
+
+```bash
+code C:\Users\you\nfx\runs\<run-id>
+```
+
+You get `RUNBOOK.md`, `run.json`, `nexusfix.log` and `wt/` (the checkout to edit). The
+runbook is copied here by `discover`, so the agent has the instructions and the code in one
+place. It sits beside `wt/` rather than inside it, because `git status` reports untracked
+files and a runbook inside the checkout would be committed onto the fix branch.
+
+**3. In Copilot Chat (agent mode), say:**
+
+> Read RUNBOOK.md and follow it. The run_id is `<paste it>`.
+
+That is the whole interaction. The runbook tells the agent to read the findings, edit `wt/`,
+then run `check` and `publish` itself.
+
+**4. Or drive the remaining steps yourself** — the agent only has to do the editing:
+
+```bash
 nexusfix check --run-id <run-id>      # classify the diff, then build and test
+```
+
+```bash
 nexusfix publish --run-id <run-id>    # commit, push, rescan to confirm, open a PR
 ```
 
-To use it, open your repo in VS Code and tell Copilot Chat:
+[RUNBOOK.md](RUNBOOK.md) holds the full steps, the JSON shapes and the prohibitions.
 
-> Read RUNBOOK.md and follow it.
+### Notes
 
-[RUNBOOK.md](RUNBOOK.md) holds the steps, the JSON shapes and the prohibitions.
+The worktree is a **git worktree**, not a clone. One mirror per application lives at
+`$NEXUSFIX_WORKSPACE_ROOT/mirrors/<app-id>`, and each run adds a worktree off it already
+switched to `autofix/nexus/<run-id>`. The agent never clones, branches or configures
+anything.
+
+The runbook tells the agent not to commit, because `publish` does that. If it commits
+anyway — agents do — nothing breaks: `check` and `publish` diff from the commit the
+worktree was created at, not from `HEAD`, so the changes are still seen and still
+classified. Committing cannot be used to slip a suspicious diff past the classifier.
 
 Verification is deliberately **not** delegated, because the agent asking to publish is the same
 one that made the changes:

@@ -108,6 +108,7 @@ def check_worktree(
     node_toolchains: dict[str, str],
     timeout_seconds: int,
     env: dict[str, str],
+    base_ref: str = "HEAD",
 ) -> CheckResult:
     """Classify the diff, then build and test — in that order, and stopping early.
 
@@ -115,8 +116,14 @@ def check_worktree(
     a diff that disables tests or waives the policy can be made to build and pass
     trivially. Running the build first and the classifier second would let exactly the
     changes this is meant to catch report a clean result.
+
+    `base_ref` should be the commit the worktree was created at, NOT the default HEAD.
+    Agents commit out of habit however firmly the runbook says not to, and against HEAD a
+    committed change diffs to nothing — so the work would be reported as "nothing changed"
+    and never verified. Diffing from the run's base commit gives the same answer whether
+    the agent committed or not.
     """
-    diff_result = diff_mod.classify_diff(worktree)
+    diff_result = diff_mod.classify_diff(worktree, base_ref)
     base = {
         "worktree": str(worktree),
         "changed_files": diff_result.changed_files,

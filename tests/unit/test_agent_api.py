@@ -184,3 +184,55 @@ def test_a_missing_runbook_warns_rather_than_crashing_the_run(tmp_path, monkeypa
         assert agent_api.place_runbook(tmp_path) is None
 
     assert "could not find RUNBOOK.md" in caplog.text
+
+
+def test_changes_are_still_verified_when_the_agent_commits_them(tmp_path):
+    # Agents commit out of habit however firmly the runbook says not to. Against HEAD a
+    # committed change diffs to nothing, so the work would report as "nothing changed" and
+    # never be verified. Diffing from the run's base commit is immune to that.
+    repo = _repo(tmp_path)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, encoding="utf-8", check=True,
+    ).stdout.strip()
+
+    (repo / "package.json").write_text(
+        '{"name":"d","version":"1.0.0","dependencies":{"postcss":"8.5.18"}}', encoding="utf-8"
+    )
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "agent committed"], cwd=repo, check=True, capture_output=True)
+
+    against_head = agent_api.check_worktree(
+        worktree=repo, ecosystem="npm", java_version=None, node_version=None,
+        java_toolchains={}, node_toolchains={}, timeout_seconds=60, env=dict(os.environ),
+    )
+    assert "nothing changed" in against_head.message, "the trap this guards against"
+
+    against_base = agent_api.check_worktree(
+        worktree=repo, ecosystem="npm", java_version=None, node_version=None,
+        java_toolchains={}, node_toolchains={}, timeout_seconds=60, env=dict(os.environ),
+        base_ref=base,
+    )
+    assert against_base.changed_files == ["package.json"], "the change is seen either way"
+    assert "nothing changed" not in against_base.message
+
+
+def test_a_committed_suspicious_diff_is_still_refused(tmp_path):
+    # The classifier must not be escapable by committing first.
+    repo = _repo(tmp_path)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, encoding="utf-8", check=True,
+    ).stdout.strip()
+
+    (repo / "app.test.js").write_text("describe.skip('all', () => {})\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "sneaky"], cwd=repo, check=True, capture_output=True)
+
+    result = agent_api.check_worktree(
+        worktree=repo, ecosystem="npm", java_version=None, node_version=None,
+        java_toolchains={}, node_toolchains={}, timeout_seconds=60, env=dict(os.environ),
+        base_ref=base,
+    )
+
+    assert result.ok is False
+    assert result.diff_classification == "SUSPICIOUS"
+    assert result.build_ok is None

@@ -141,3 +141,46 @@ def test_the_payload_is_json_serialisable():
 
     views = [asdict(v) for v in agent_api.finding_views([_finding()], min_threat_level=8)]
     assert json.loads(agent_api.as_json({"findings": views}))["findings"][0]["target_version"] == "8.5.18"
+
+
+def test_the_runbook_is_placed_beside_the_worktree_not_inside_it(tmp_path):
+    # Inside the worktree it would show up as an untracked file in git status, get
+    # classified as part of the fix, and be committed onto the branch.
+    run_dir = tmp_path / "runs" / "abc"
+    run_dir.mkdir(parents=True)
+    (run_dir / "wt").mkdir()
+
+    placed = agent_api.place_runbook(run_dir)
+
+    assert placed == run_dir / agent_api.RUNBOOK_FILENAME
+    assert "nexusfix discover" in placed.read_text(encoding="utf-8"), "the real runbook"
+    assert not (run_dir / "wt" / agent_api.RUNBOOK_FILENAME).exists()
+
+
+def test_the_runbook_falls_back_to_the_working_directory(tmp_path, monkeypatch):
+    # Covers a non-editable install, where the file does not sit next to the package.
+    elsewhere = tmp_path / "pkg"
+    elsewhere.mkdir()
+    monkeypatch.setattr(agent_api, "__file__", str(elsewhere / "agent_api.py"))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    (cwd / agent_api.RUNBOOK_FILENAME).write_text("# steps", encoding="utf-8")
+    monkeypatch.chdir(cwd)
+
+    placed = agent_api.place_runbook(tmp_path)
+
+    assert placed.read_text(encoding="utf-8") == "# steps"
+
+
+def test_a_missing_runbook_warns_rather_than_crashing_the_run(tmp_path, monkeypatch, caplog):
+    import logging
+
+    empty = tmp_path / "nowhere"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    monkeypatch.setattr(agent_api, "__file__", str(empty / "agent_api.py"))
+
+    with caplog.at_level(logging.WARNING):
+        assert agent_api.place_runbook(tmp_path) is None
+
+    assert "could not find RUNBOOK.md" in caplog.text

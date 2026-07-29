@@ -634,10 +634,13 @@ def perform_discovery(
     }
     agent_api.save_run_state(run_dir, state)
 
+    runbook = agent_api.place_runbook(run_dir)
     views = agent_api.finding_views(findings, config.min_threat_level)
     log.info("discover %s prepared %s with %d finding(s)", run_id, worktree.path, len(views))
     return {
         **{k: state[k] for k in ("run_id", "run_dir", "worktree", "fix_branch", "ecosystem")},
+        "runbook": str(runbook) if runbook else None,
+        "open_this_in_your_editor": str(run_dir),
         "build_command": " ".join(commands_mod.BUILD_COMMANDS[strategy.ecosystem](worktree.path)),
         "test_command": " ".join(commands_mod.TEST_COMMANDS[strategy.ecosystem](worktree.path)),
         "findings": [asdict(v) for v in views],

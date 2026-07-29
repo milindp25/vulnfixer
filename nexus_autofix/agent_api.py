@@ -197,6 +197,35 @@ def read_verdict(run_dir: Path) -> dict | None:
 
 STATE_FILENAME = "run.json"
 
+RUNBOOK_FILENAME = "RUNBOOK.md"
+
+
+def place_runbook(run_dir: Path) -> Path | None:
+    """Copy the runbook into the run directory, beside the worktree but outside it.
+
+    Two reasons it goes in `run_dir` rather than the worktree:
+
+    * The worktree is a git checkout and `git status --porcelain` reports untracked files,
+      so a runbook left inside it would land in the diff, be classified, and be committed
+      onto the fix branch.
+    * It means the agent only ever needs `run_dir` open, which contains the worktree and
+      nothing else. The directory holding `.env` and `config.yml` stays out of its
+      workspace entirely.
+    """
+    for candidate in (
+        Path(__file__).resolve().parent.parent / RUNBOOK_FILENAME,  # editable install
+        Path.cwd() / RUNBOOK_FILENAME,
+    ):
+        if candidate.is_file():
+            destination = run_dir / RUNBOOK_FILENAME
+            destination.write_text(candidate.read_text(encoding="utf-8"), encoding="utf-8")
+            return destination
+    log.warning(
+        "could not find %s to copy into the run directory; point the agent at the copy in "
+        "the repository instead", RUNBOOK_FILENAME,
+    )
+    return None
+
 
 def save_run_state(run_dir: Path, state: dict) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)

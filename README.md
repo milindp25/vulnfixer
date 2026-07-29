@@ -96,9 +96,21 @@ Gradle 8.10 into `~/.gradle` via the wrapper; subsequent runs are fast.
 
 ```bash
 .venv/bin/nexusfix --help
-.venv/bin/nexusfix run --app-id <app-id> --branch <branch-name> [--gate none|pre-pr|pre-push] [--dry-run] [--mock-agent]
+.venv/bin/nexusfix run --app-id <app-id> --branch <branch-name> [--gate none|pre-pr|pre-push] [--dry-run] [--mock-agent] [--interactive-agent]
 .venv/bin/nexusfix gc [--older-than-days 7]
 ```
+
+There are three ways to run the agent step. They differ **only** in who edits the files.
+Nexus IQ discovery, remediation targets, diff classification, build, test, rescan and PR are
+the same code in all three:
+
+| Mode | Who drives | Use when |
+|---|---|---|
+| `nexusfix run` | nexusfix, calling the Copilot CLI | Unattended agent runs are permitted in your org |
+| `nexusfix run --interactive-agent` | nexusfix, pausing for you | The Copilot CLI is blocked from unattended tool use |
+| `discover` / `check` / `publish` | a coding agent, reading [RUNBOOK.md](RUNBOOK.md) | You want to drive it from VS Code Copilot Chat |
+
+See [Agent-orchestrated mode](#agent-orchestrated-mode-discover--check--publish) for the third.
 
 (Windows: `.venv\Scripts\nexusfix ...`, or just `nexusfix ...` with the venv activated. The rest
 of this README writes it as plain `nexusfix` for brevity.)
@@ -126,8 +138,57 @@ Useful flags while you're getting it working:
 - `--mock-agent` — substitutes a no-op agent so you can verify IQ discovery, mirroring, worktree
   creation, and toolchain resolution all work before involving the Copilot CLI at all.
 - `--gate pre-push` — stops after build/test, before anything is pushed.
+- `--interactive-agent` — does everything above except step 5, then prints the prepared
+  worktree path and waits. You run Copilot there yourself (CLI or VS Code Chat), or edit by
+  hand, then press Enter and steps 6-8 continue. Use this when your organisation's Copilot
+  policy answers *"Access denied by policy settings"*: that block applies to unattended tool
+  use (`--allow-all-tools`), not to a human approving each action. Only `git status` decides
+  what changed, so it makes no difference what did the editing.
 
 `nexusfix gc` sweeps stale `autofix/nexus/*` branches with no open PR via the GitHub REST API.
+
+## Agent-orchestrated mode (`discover` / `check` / `publish`)
+
+The inverse arrangement: a coding agent drives and calls nexusfix as a tool, rather than
+nexusfix driving and calling the agent. Built for organisations where the Copilot CLI cannot
+run unattended at all, leaving an interactive agent as the only thing able to edit files.
+
+**The agent never talks to Nexus IQ.** Every IQ call stays in `nexus_autofix/iq/client.py` —
+the same client, endpoints and parsing that `nexusfix run` uses. The agent runs these commands
+and reads their JSON.
+
+```bash
+nexusfix discover                     # IQ scan -> findings + a prepared worktree, as JSON
+#   ... the agent edits the worktree ...
+nexusfix check --run-id <run-id>      # classify the diff, then build and test
+nexusfix publish --run-id <run-id>    # commit, push, rescan to confirm, open a PR
+```
+
+To use it, open your repo in VS Code and tell Copilot Chat:
+
+> Read RUNBOOK.md and follow it.
+
+[RUNBOOK.md](RUNBOOK.md) holds the steps, the JSON shapes and the prohibitions.
+
+Verification is deliberately **not** delegated, because the agent asking to publish is the same
+one that made the changes:
+
+- `check` classifies the diff and refuses a `SUSPICIOUS` one **before building anything**. The
+  ordering is the safeguard, not an optimisation: a diff that disables tests builds and passes
+  trivially, so classifying afterwards would bless exactly what the classifier exists to catch.
+- `publish` refuses without a passing verdict that `check` itself wrote, and re-reads the diff —
+  if the worktree changed since `check`, what would be pushed is not what was verified, and it
+  stops.
+- The IQ rescan still has to confirm the findings cleared. If it does not, the pushed branch is
+  deleted rather than left inviting a merge.
+- Findings carry `is_direct` and `pulled_in_by`, so a transitive finding does not get "fixed" by
+  adding a direct dependency to force a version.
+
+`run.json` and `verdict.json` are written beside the log in
+`$NEXUSFIX_WORKSPACE_ROOT/runs/<run-id>/`; that is how state survives between the three
+invocations.
+
+This mode lives on the `copilot-orchestrator` branch and is unproven against a real agent.
 
 ## Configuration
 
@@ -264,14 +325,31 @@ installed Copilot CLI was available on the machine it was built on. Expect to it
 two on first live run:
 
 - **`nexus_autofix/iq/client.py`** (`HTTPIQClient`) — the Nexus IQ HTTP client. Endpoint sequence
-  follows the design doc's section 7 exactly, but field names in the JSON responses are
-  best-effort guesses. Polling is written defensively: an HTTP 200 with a pending status keeps
-  polling, a terminal failure status fails immediately with IQ's own error message rather than
-  burning the full timeout, and several plausible spellings of the status field and its values
-  are matched case-insensitively. If your instance uses different names, the DEBUG log shows the
-  real response and the fix is a one-line change to `_STATUS_FIELDS` / the status value sets.
+  follows the design doc's section 7. Polling is written defensively: an HTTP 200 with a pending
+  status keeps polling, a terminal failure fails immediately with IQ's own error message rather
+  than burning the full timeout, and several plausible spellings of the status field are matched
+  case-insensitively.
+
+  These parts are now **confirmed against a live instance** and should not be "corrected" back
+  to what the design doc says:
+
+  | Behaviour | What the doc implied | What the instance does |
+  |---|---|---|
+  | `sourceControlEvaluation` body | include `commitHash` | only `stageId` + `branchName`; `commitHash` is rejected |
+  | `statusUrl` | absolute or rooted | returned with **no** leading slash — must be normalised |
+  | report id | last path segment of `reportDataUrl` | the URL ends `/raw`, so the id is the segment **after** `reports` |
+  | `/policy` response | a bare array | an object with a `components` array |
+  | remediation version | `data.componentIdentifier…version` | `data.`**`component`**`.componentIdentifier.coordinates.version` |
+
+  Still unconfirmed: `parentRemediation` and `goldenVersion`. Neither appeared in any live
+  response seen so far, so if a transitive finding reports empty parent-bump advice, check
+  those field names first.
+
 - **`nexus_autofix/agent/copilot_cli.py`** (`CopilotCLIAgent`) — the Copilot CLI adapter. The
-  exact non-interactive invocation flags are unconfirmed.
+  non-interactive invocation flags are still unconfirmed. It now fails loudly rather than
+  returning "no changes": a missing binary, a non-zero exit or a timeout each raise with the
+  command and the CLI's own output attached. On an organisation that blocks unattended tool use
+  this reports *"Access denied by policy settings"* — see `--interactive-agent` above.
 
 Suggested order for the first live run, so a failure tells you exactly which layer broke:
 
@@ -287,6 +365,10 @@ nexusfix run --dry-run
 # 3. Full run, stopping for your approval before the PR is opened.
 nexusfix run --gate pre-pr
 ```
+
+If step 2 fails with *"Access denied by policy settings"*, your organisation blocks unattended
+Copilot tool use. Use `nexusfix run --interactive-agent` instead, or the
+[agent-orchestrated mode](#agent-orchestrated-mode-discover--check--publish).
 
 (Or pass `--app-id <app> --branch <branch>` explicitly on any of them to override `.env`.)
 

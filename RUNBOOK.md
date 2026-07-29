@@ -53,7 +53,16 @@ The fields:
 }
 ```
 
-**Read `findings` carefully.**
+**Read `findings` carefully. It is the only list you act on.**
+
+Each entry states the change to make outright — you do not work out, look up or choose any
+version yourself. The example above means exactly:
+
+> upgrade `brace-expansion` from `5.0.7` to `5.0.8`
+
+Ignore `target_purls` if you see it in `run.json`. It is internal bookkeeping for the
+post-fix rescan, and the versions in it are the CURRENT ones — acting on it would leave
+everything as it is.
 
 - Only work on entries with `"actionable": true`. An entry with `"actionable": false`
   has a `reason_not_actionable` — report it to the user and leave it alone.

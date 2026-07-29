@@ -8,17 +8,26 @@ Replace `nexusfix` below with the path to the executable if it is not on your PA
 
 ---
 
-## Step 1 — Discover what needs fixing
+## Step 1 — Find out what needs fixing
+
+**If you were given a `run_id`**, the work has already been done. Read `run.json` in this
+same directory and use what is in it. Do **not** run `discover` again — that would start a
+second Nexus IQ scan and create a second worktree.
+
+**Only if you were not given a `run_id`**, run:
 
 ```
 nexusfix discover
 ```
 
-This talks to Nexus IQ, scans the branch, works out which components need upgrading and
-to which versions, and prepares a git worktree for you to edit. It changes nothing in the
-repository you are sitting in.
+Either way you end up with the same information. `discover` talks to Nexus IQ, scans the
+branch, works out which components need upgrading and to which versions, prepares a git
+worktree, and writes all of it to `run.json`.
 
-It prints:
+Do not read `nexusfix.log` for this. It is a human-readable trace with no stable format —
+`run.json` is the machine-readable source of truth.
+
+The fields:
 
 ```json
 {

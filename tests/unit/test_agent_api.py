@@ -8,6 +8,7 @@ verdict is something this tool produces, never something the agent asserts.
 import json
 import os
 import subprocess
+from dataclasses import asdict
 
 import pytest
 
@@ -137,8 +138,6 @@ def test_an_unfixable_finding_is_shown_with_its_reason_not_silently_dropped():
 
 
 def test_the_payload_is_json_serialisable():
-    from dataclasses import asdict
-
     views = [asdict(v) for v in agent_api.finding_views([_finding()], min_threat_level=8)]
     assert json.loads(agent_api.as_json({"findings": views}))["findings"][0]["target_version"] == "8.5.18"
 
@@ -236,3 +235,20 @@ def test_a_committed_suspicious_diff_is_still_refused(tmp_path):
     assert result.ok is False
     assert result.diff_classification == "SUSPICIOUS"
     assert result.build_ok is None
+
+
+def test_run_state_carries_the_findings_so_a_run_id_is_enough(tmp_path):
+    # Whoever runs `discover` is often not who edits: you run it, then hand a run_id to an
+    # agent in an editor that never saw the stdout. If the findings were not persisted, the
+    # agent's only options would be re-running discover (a second IQ scan and worktree) or
+    # scraping the log.
+    run_dir = tmp_path / "runs" / "abc"
+    findings = [asdict(v) for v in agent_api.finding_views([_finding()], min_threat_level=8)]
+    agent_api.save_run_state(run_dir, {"run_id": "abc", "findings": findings})
+
+    reloaded = agent_api.load_run_state(tmp_path, "abc")
+
+    assert reloaded["findings"][0]["component"] == "postcss"
+    assert reloaded["findings"][0]["current_version"] == "8.5.10"
+    assert reloaded["findings"][0]["target_version"] == "8.5.18"
+    assert reloaded["findings"][0]["pulled_in_by"] == ["pkg:npm/parent@1.0"]

@@ -657,6 +657,82 @@ def _agent_json(payload: object) -> None:
     click.echo(agent_api.as_json(payload))
 
 
+def _echo_next_steps(payload: dict) -> None:
+    """Print what to do next, for a human, on STDERR.
+
+    Stderr rather than stdout on purpose: stdout is the machine contract for these
+    commands, and an agent doing `nexusfix discover | jq` must not have prose spliced into
+    the JSON. Both still appear in a terminal, which is the point — a run that ends in a
+    wall of JSON and nothing else leaves the reader guessing what to do with it.
+    """
+    run_dir = payload.get("open_this_in_your_editor") or payload.get("run_dir") or ""
+    run_id = payload.get("run_id", "")
+    findings = payload.get("findings") or []
+    actionable = [f for f in findings if f.get("actionable")]
+    blocked = [f for f in findings if not f.get("actionable")]
+
+    lines = ["", "=" * 78, "  WHAT NEEDS FIXING", "=" * 78, ""]
+    if actionable:
+        for f in actionable:
+            transitive = " (transitive — the fix may belong in a parent)" if not f.get("is_direct") else ""
+            lines.append(
+                f"  {f['component']}  {f['current_version']} -> {f['target_version']}"
+                f"  [threat {f['threat_level']}]{transitive}"
+            )
+    else:
+        lines.append("  Nothing can be fixed automatically.")
+    for f in blocked:
+        lines.append(
+            f"  {f['component']}  {f['current_version']} -> NOT FIXABLE"
+            f"  ({f.get('reason_not_actionable') or 'no newer version from IQ'})"
+        )
+
+    if not actionable:
+        # Sending someone to an editor to change nothing wastes their time; the reasons
+        # above are the whole result of the run.
+        lines += [
+            "",
+            "  No upgrade is available for any of these, so there is nothing to hand to an",
+            "  agent. The reasons are listed above and in the log:",
+            "",
+            f"    {run_dir}\\nexusfix.log" if "\\" in str(run_dir) else f"    {run_dir}/nexusfix.log",
+            "",
+            "=" * 78,
+            "",
+        ]
+        click.echo("\n".join(lines), err=True)
+        return
+
+    lines += [
+        "",
+        "=" * 78,
+        "  NEXT STEPS",
+        "=" * 78,
+        "",
+        "  1. Open the run directory in your editor (NOT this repo):",
+        "",
+        f"       code {run_dir}",
+        "",
+        "     It holds RUNBOOK.md, run.json, nexusfix.log, and wt/ — the checkout to edit.",
+        "",
+        "  2. In Copilot Chat (agent mode), or any coding agent, say:",
+        "",
+        "       Read RUNBOOK.md and follow it.",
+        f"       The run_id is {run_id}",
+        "",
+        "  3. Or do the rest yourself — edit wt/ by hand, then:",
+        "",
+        f"       nexusfix check --run-id {run_id}",
+        f"       nexusfix publish --run-id {run_id}",
+        "",
+        "  Do not commit in wt/ — `nexusfix publish` does that, after verifying.",
+        "",
+        "=" * 78,
+        "",
+    ]
+    click.echo("\n".join(lines), err=True)
+
+
 @main.command("discover")
 @click.option("--app-id", default=None, help="IQ public application ID. Defaults to $NEXUSFIX_APP_ID.")
 @click.option("--branch", default=None, help="Branch to scan. Defaults to $NEXUSFIX_BRANCH.")
@@ -683,6 +759,7 @@ def discover_command(app_id: str | None, branch: str | None, verbose: bool):
     except Exception as exc:
         raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
     _agent_json(payload)
+    _echo_next_steps(payload)
 
 
 @main.command("check")

@@ -295,3 +295,94 @@ def test_interactive_agent_defaults_to_off(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert fake.call_args.kwargs["interactive_agent"] is False
+
+
+# --------------------------------------------------------------------------------------
+# `discover` ends in a wall of JSON. Without a human summary the reader is left guessing
+# what to do with it — but stdout is the machine contract, so the prose goes to stderr.
+# --------------------------------------------------------------------------------------
+
+
+def _discover_payload(**overrides):
+    base = {
+        "run_id": "run-123",
+        "open_this_in_your_editor": "/ws/runs/run-123",
+        "findings": [
+            {"component": "brace-expansion", "current_version": "5.0.7",
+             "target_version": "5.0.8", "threat_level": 9, "is_direct": False,
+             "actionable": True},
+        ],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_the_next_steps_go_to_stderr_so_stdout_stays_parseable(capsys):
+    import json as _json
+
+    from nexus_autofix import cli as cli_mod
+
+    payload = _discover_payload()
+    cli_mod._agent_json(payload)
+    cli_mod._echo_next_steps(payload)
+
+    captured = capsys.readouterr()
+    assert _json.loads(captured.out) == payload, "stdout must be JSON and nothing else"
+    assert "NEXT STEPS" in captured.err
+    assert "NEXT STEPS" not in captured.out
+
+
+def test_the_summary_shows_the_version_change_and_the_commands(capsys):
+    from nexus_autofix import cli as cli_mod
+
+    cli_mod._echo_next_steps(_discover_payload())
+
+    err = capsys.readouterr().err
+    assert "brace-expansion  5.0.7 -> 5.0.8" in err
+    assert "code /ws/runs/run-123" in err
+    assert "Read RUNBOOK.md and follow it." in err
+    assert "nexusfix check --run-id run-123" in err
+    assert "nexusfix publish --run-id run-123" in err
+    assert "Do not commit" in err
+
+
+def test_a_transitive_finding_is_flagged_as_such(capsys):
+    from nexus_autofix import cli as cli_mod
+
+    cli_mod._echo_next_steps(_discover_payload())
+
+    assert "transitive" in capsys.readouterr().err
+
+
+def test_an_unfixable_finding_is_listed_with_its_reason(capsys):
+    from nexus_autofix import cli as cli_mod
+
+    cli_mod._echo_next_steps(_discover_payload(findings=[
+        {"component": "brace-expansion", "current_version": "5.0.7", "target_version": "5.0.8",
+         "threat_level": 9, "is_direct": True, "actionable": True},
+        {"component": "svgo", "current_version": "4.0.1", "target_version": None,
+         "threat_level": 9, "is_direct": False, "actionable": False,
+         "reason_not_actionable": "IQ offered 4.0.1, which is not an upgrade"},
+    ]))
+
+    err = capsys.readouterr().err
+    assert "svgo  4.0.1 -> NOT FIXABLE" in err
+    assert "not an upgrade" in err
+
+
+def test_with_nothing_fixable_it_does_not_send_you_to_an_editor(capsys):
+    # Opening a worktree to change nothing wastes the reader's time; the reasons are the
+    # entire result of the run.
+    from nexus_autofix import cli as cli_mod
+
+    cli_mod._echo_next_steps(_discover_payload(findings=[
+        {"component": "svgo", "current_version": "4.0.1", "target_version": None,
+         "threat_level": 9, "is_direct": False, "actionable": False,
+         "reason_not_actionable": "IQ offered 4.0.1, which is not an upgrade"},
+    ]))
+
+    err = capsys.readouterr().err
+    assert "Nothing can be fixed automatically." in err
+    assert "NEXT STEPS" not in err
+    assert "Read RUNBOOK.md" not in err
+    assert "nexusfix.log" in err, "point at where the reasons are recorded"

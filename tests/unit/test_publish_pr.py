@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from nexus_autofix.publish.pr import open_pull_request
 

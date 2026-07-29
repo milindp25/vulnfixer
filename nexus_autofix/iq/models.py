@@ -17,11 +17,9 @@ class Finding:
     parent_component: str | None
     parent_current_version: str | None
     parent_target_version: str | None
-    policy_action: str
     threat_level: int
     policy_name: str
     cve_ids: list[str]
-    manifest_path: Path | None
     is_dev_dependency: bool = False
     is_waived: bool = False
     golden_version: str | None = None

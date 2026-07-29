@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import subprocess
 import uuid
+from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 
 import click
 
+from nexus_autofix import agent_api
 from nexus_autofix.agent.copilot_cli import CopilotCLIAgent
 from nexus_autofix.agent.interactive import InteractiveAgent
 from nexus_autofix.agent.mock import MockAgent, MockMode
@@ -23,21 +27,22 @@ from nexus_autofix.orchestrator import Orchestrator, RunConfig, RunResult
 from nexus_autofix.publish import branch as branch_mod
 from nexus_autofix.publish.gate import present_pre_pr_gate
 from nexus_autofix.publish.pr import open_pull_request
+from nexus_autofix.repo import trident as trident_mod
 from nexus_autofix.repo.descriptor import read_descriptor, unexpired_suppressions
 from nexus_autofix.repo.workspace import (
     clone_or_update_mirror,
     create_worktree,
-    current_commit_sha,
     remove_worktree,
     resolve_branch_commit_sha,
 )
 from nexus_autofix.state.store import StateStore
+from nexus_autofix.verify import commands as commands_mod
+from nexus_autofix.verify import diff as diff_mod
+from nexus_autofix.verify import rescan as rescan_mod
 
 log = logging.getLogger(__name__)
 
 _PURL_RE = re.compile(r"^pkg:(?P<type>[^/]+)/(?P<rest>[^@]+)@(?P<version>.+)$")
-
-_DESIGN_DOC = "docs/superpowers/specs/2026-07-28-nexus-autofix-design.md"
 
 
 def _owner_repo_from_url(repo_url: str) -> tuple[str, str]:
@@ -100,11 +105,9 @@ def _finding_without_remediation(v, reason: str) -> Finding:
         parent_component=None,
         parent_current_version=None,
         parent_target_version=None,
-        policy_action=v.action,
         threat_level=v.threat_level,
         policy_name=v.policy_name,
         cve_ids=[],
-        manifest_path=None,
         is_waived=v.is_waived,
         escalation_reason=reason,
     )
@@ -211,12 +214,10 @@ def findings_from_policy_report(
                 parent_component=remediation.parent_component,
                 parent_current_version=remediation.parent_current_version,
                 parent_target_version=remediation.parent_target_version,
-                policy_action=v.action,
-                threat_level=v.threat_level,
+                        threat_level=v.threat_level,
                 policy_name=v.policy_name,
                 cve_ids=[],
-                manifest_path=None,
-                is_waived=v.is_waived,
+                        is_waived=v.is_waived,
                 golden_version=remediation.golden_version,
             )
         )
@@ -547,3 +548,281 @@ def gc_command(older_than_days: int):
         )
         for name in deleted:
             click.echo(f"deleted stale branch: {app_id}/{name}")
+
+
+# ======================================================================================
+# Agent-as-orchestrator commands.
+#
+# The default `run` command drives the pipeline and calls an agent for one step. These
+# invert that: a coding agent reads RUNBOOK.md and calls these as tools. Built for orgs
+# whose Copilot policy blocks unattended tool use, leaving an interactive agent as the
+# only thing that can edit files.
+#
+# discover -> (agent edits) -> check -> publish. The safety checks stay on this side:
+# `check` classifies the diff and refuses a SUSPICIOUS one before building anything, and
+# `publish` will not run without a passing verdict that `check` itself wrote.
+# ======================================================================================
+
+
+def perform_discovery(
+    app_id: str, branch: str, config: ProjectConfig, secrets: Secrets, verbose: bool = False
+) -> dict:
+    """Everything `run` does up to (not including) the agent, then stop and report.
+
+    Deliberately stops at the worktree. The agent is the caller here, so handing it the
+    findings and a prepared directory is the whole job.
+    """
+    repo_url = config.repos[app_id]
+    workspace_root = secrets.workspace_root
+    run_id = str(uuid.uuid4())
+    run_dir = workspace_root / "runs" / run_id
+    fix_branch = f"autofix/nexus/{run_id}"
+    configure_logging(run_dir / "nexusfix.log", verbose=verbose)
+    log.info("discover %s: app_id=%s branch=%s", run_id, app_id, branch)
+    try_enable_os_trust_store()
+    warn_if_insecure()
+
+    iq_client = HTTPIQClient(secrets.iq_url, secrets.iq_username, secrets.iq_password)
+    internal_id = iq_client.resolve_application_internal_id(app_id)
+    mirror_path = workspace_root / "mirrors" / app_id
+    clone_or_update_mirror(repo_url, mirror_path)
+    commit_sha = resolve_branch_commit_sha(mirror_path, branch)
+
+    status_url = iq_client.start_source_control_evaluation(
+        internal_id, branch, config.default_stage_id
+    )
+    baseline_report_id = iq_client.poll_evaluation(status_url, config.poll_timeout_seconds)
+    violations = iq_client.fetch_policy_report(app_id, baseline_report_id)
+    findings = findings_from_policy_report(
+        iq_client, internal_id, violations, config.default_stage_id, config.min_threat_level
+    )
+
+    worktree = create_worktree(mirror_path, run_dir, commit_sha, fix_branch)
+    try:
+        strategies = trident_mod.parse_trident_build_yaml(
+            worktree.path / ".trident" / "build.yaml"
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(
+            f"cannot determine how to build this repo: {exc}. A usable "
+            ".trident/build.yaml is required before an agent can verify its own changes."
+        ) from exc
+    if len(strategies) > 1:
+        raise click.ClickException(
+            f"repo declares multiple .trident strategies ({[s.ecosystem for s in strategies]}). "
+            "Verifying one and publishing all of them is not safe, so this is refused."
+        )
+    strategy = strategies[0]
+    java_version = strategy.toolchain.get("java")
+    node_version = strategy.toolchain.get("node")
+
+    state = {
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "worktree": str(worktree.path),
+        "fix_branch": fix_branch,
+        "app_id": app_id,
+        "base_branch": branch,
+        "repo_url": repo_url,
+        "commit_sha": commit_sha,
+        "internal_id": internal_id,
+        "baseline_report_id": baseline_report_id,
+        "ecosystem": strategy.ecosystem,
+        "java_version": java_version,
+        "node_version": node_version,
+        "target_purls": [f.package_url for f in findings if f.is_actionable],
+    }
+    agent_api.save_run_state(run_dir, state)
+
+    runbook = agent_api.place_runbook(run_dir)
+    views = agent_api.finding_views(findings, config.min_threat_level)
+    log.info("discover %s prepared %s with %d finding(s)", run_id, worktree.path, len(views))
+    return {
+        **{k: state[k] for k in ("run_id", "run_dir", "worktree", "fix_branch", "ecosystem")},
+        "runbook": str(runbook) if runbook else None,
+        "open_this_in_your_editor": str(run_dir),
+        "build_command": " ".join(commands_mod.BUILD_COMMANDS[strategy.ecosystem](worktree.path)),
+        "test_command": " ".join(commands_mod.TEST_COMMANDS[strategy.ecosystem](worktree.path)),
+        "findings": [asdict(v) for v in views],
+    }
+
+
+def _agent_json(payload: object) -> None:
+    """The ONLY thing these commands put on stdout, so an agent can parse it."""
+    click.echo(agent_api.as_json(payload))
+
+
+@main.command("discover")
+@click.option("--app-id", default=None, help="IQ public application ID. Defaults to $NEXUSFIX_APP_ID.")
+@click.option("--branch", default=None, help="Branch to scan. Defaults to $NEXUSFIX_BRANCH.")
+@click.option("-v", "--verbose", is_flag=True, default=False)
+def discover_command(app_id: str | None, branch: str | None, verbose: bool):
+    """Find what needs fixing and prepare a worktree, without touching the agent.
+
+    Prints the findings and the worktree path as JSON. Nothing is committed or pushed.
+    """
+    config = load_project_config(Path("config.yml"))
+    secrets = load_secrets()
+    app_id = app_id or secrets.default_app_id
+    branch = branch or secrets.default_branch
+    if not app_id or not branch:
+        raise click.ClickException(
+            "need --app-id and --branch (or NEXUSFIX_APP_ID / NEXUSFIX_BRANCH in .env)"
+        )
+    if app_id not in config.repos:
+        raise click.ClickException(f"no repo URL configured for app_id={app_id!r} in config.yml")
+    _require_secrets(secrets, dry_run=True)
+
+    try:
+        payload = perform_discovery(app_id, branch, config, secrets, verbose)
+    except Exception as exc:
+        raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
+    _agent_json(payload)
+
+
+@main.command("check")
+@click.option("--run-id", required=True, help="The run_id printed by `nexusfix discover`.")
+@click.option("-v", "--verbose", is_flag=True, default=False)
+def check_command(run_id: str, verbose: bool):
+    """Classify the diff, then build and test the worktree. Records the verdict."""
+    secrets = load_secrets()
+    config = load_project_config(Path("config.yml"))
+    try:
+        state = agent_api.load_run_state(secrets.workspace_root, run_id)
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    run_dir = Path(state["run_dir"])
+    configure_logging(run_dir / "nexusfix.log", verbose=verbose)
+    result = agent_api.check_worktree(
+        worktree=Path(state["worktree"]),
+        ecosystem=state["ecosystem"],
+        java_version=state.get("java_version"),
+        node_version=state.get("node_version"),
+        java_toolchains=config.java_toolchains,
+        node_toolchains=config.node_toolchains,
+        timeout_seconds=config.subprocess_timeout_seconds,
+        env=dict(os.environ),
+        base_ref=state["commit_sha"],
+    )
+    agent_api.write_verdict(run_dir, result)
+    _agent_json(asdict(result))
+
+
+@main.command("publish")
+@click.option("--run-id", required=True, help="The run_id printed by `nexusfix discover`.")
+@click.option("--dry-run", is_flag=True, default=False, help="Do everything except mutate the remote.")
+@click.option("-v", "--verbose", is_flag=True, default=False)
+def publish_command(run_id: str, dry_run: bool, verbose: bool):
+    """Commit, push, rescan in IQ to confirm the fix, and open a PR.
+
+    Refuses without a passing verdict from `check`. That gate is the point: the agent
+    calling this is the same one that made the changes, so its own assurance that they
+    are good is worth nothing. The verdict is written by `check` itself, from a real
+    build and a real diff classification.
+    """
+    secrets = load_secrets()
+    config = load_project_config(Path("config.yml"))
+    try:
+        state = agent_api.load_run_state(secrets.workspace_root, run_id)
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    run_dir = Path(state["run_dir"])
+    configure_logging(run_dir / "nexusfix.log", verbose=verbose)
+
+    verdict = agent_api.read_verdict(run_dir)
+    if verdict is None:
+        raise click.ClickException(
+            "no verdict recorded for this run — run `nexusfix check --run-id "
+            f"{run_id}` first. Publishing without a verified build is not allowed."
+        )
+    if not verdict.get("ok"):
+        raise click.ClickException(
+            f"the last check did not pass: {verdict.get('message')}. Fix the changes and "
+            "run check again. Publishing is blocked until it passes."
+        )
+
+    worktree = Path(state["worktree"])
+    # Re-read the diff now, rather than trusting the verdict's copy: the worktree may have
+    # been edited between check and publish, in which case what would be pushed is not
+    # what was verified.
+    current = diff_mod.classify_diff(worktree, state["commit_sha"])
+    if sorted(current.changed_files) != sorted(verdict.get("changed_files", [])):
+        raise click.ClickException(
+            "the worktree changed since `check` ran — what would be published is not what "
+            f"was verified. Run `nexusfix check --run-id {run_id}` again.\n"
+            f"  verified: {sorted(verdict.get('changed_files', []))}\n"
+            f"  now:      {sorted(current.changed_files)}"
+        )
+    if current.classification == diff_mod.DiffClass.SUSPICIOUS:
+        raise click.ClickException(
+            f"refusing to publish a suspicious diff: {'; '.join(current.suspicious_reasons)}"
+        )
+
+    _require_secrets(secrets, dry_run)
+    iq_client = HTTPIQClient(secrets.iq_url, secrets.iq_username, secrets.iq_password)
+    fix_branch = state["fix_branch"]
+
+    if dry_run:
+        _agent_json({"ok": True, "dry_run": True, "would_push": fix_branch,
+                     "changed_files": current.changed_files})
+        return
+
+    log.info("committing and pushing %s", fix_branch)
+    subprocess.run(["git", "add", "-A"], cwd=str(worktree), check=True, capture_output=True)
+    # `git commit` exits non-zero when there is nothing staged, which is exactly what
+    # happens if the agent committed already despite the runbook. That is not an error —
+    # the changes are present either way, and they were verified against the run's base
+    # commit rather than HEAD, so the verdict still covers them.
+    committed = subprocess.run(
+        ["git", "commit", "-m", "fix: remediate dependency vulnerabilities via nexus-autofix"],
+        cwd=str(worktree), capture_output=True, encoding="utf-8",
+    )
+    if committed.returncode != 0:
+        if "nothing to commit" in (committed.stdout or "") + (committed.stderr or ""):
+            log.info("already committed by the agent — pushing what is on the branch")
+        else:
+            raise click.ClickException(f"git commit failed: {committed.stderr or committed.stdout}")
+    branch_mod.push_branch(worktree, "origin", fix_branch)
+
+    log.info("rescanning %s to confirm the findings actually cleared", fix_branch)
+    rescan_status_url = iq_client.start_source_control_evaluation(
+        state["internal_id"], fix_branch, config.default_stage_id
+    )
+    rescan_report_id = iq_client.poll_evaluation(rescan_status_url, config.poll_timeout_seconds)
+    comparison = rescan_mod.compare_reports(
+        iq_client.fetch_policy_report(state["app_id"], state["baseline_report_id"]),
+        iq_client.fetch_policy_report(state["app_id"], rescan_report_id),
+        set(state.get("target_purls") or []),
+    )
+
+    if not comparison.all_cleared or comparison.new_findings:
+        # The push is undone: an unverified branch left on the remote invites someone to
+        # merge a fix that did not fix anything.
+        branch_mod.delete_remote_branch(worktree, "origin", fix_branch)
+        _agent_json({
+            "ok": False,
+            "message": "the rescan shows the findings did not clear; the pushed branch was deleted",
+            "still_failing": list(comparison.still_failing),
+            "new_findings": list(comparison.new_findings),
+        })
+        raise SystemExit(1)
+
+    owner, repo = _owner_repo_from_url(state["repo_url"])
+    pull_request = open_pull_request(
+        api_url=secrets.github_api_url, token=secrets.github_token, owner=owner, repo=repo,
+        head_branch=fix_branch, base_branch=state["base_branch"],
+        title=f"fix: remediate Nexus IQ dependency findings ({state['app_id']})",
+        body=(
+            f"Automated dependency remediation by nexus-autofix (agent-orchestrated).\n\n"
+            f"- Application: `{state['app_id']}`\n"
+            f"- Base branch: `{state['base_branch']}` @ `{state['commit_sha']}`\n"
+            f"- Run id: `{run_id}`\n\n"
+            f"Target versions came from Nexus IQ policy analysis, not from the agent. The "
+            f"diff was classified as `{current.classification.value}`, the build and tests "
+            f"passed, and a follow-up IQ scan confirmed the findings cleared."
+        ),
+    )
+    _agent_json({"ok": True, "pull_request_url": pull_request.url,
+                 "pull_request_number": pull_request.number, "branch": fix_branch})

@@ -9,8 +9,8 @@ def _finding(**overrides) -> Finding:
         component="org.apache.commons:commons-text", package_url="pkg:maven/org.apache.commons/commons-text@1.9",
         current_version="1.9", target_version="1.10.0", remediation_type="next-non-failing-with-dependencies",
         is_direct=True, dependency_path=[], parent_component=None, parent_current_version=None,
-        parent_target_version=None, policy_action="Fail", threat_level=8, policy_name="Security-Critical",
-        cve_ids=["CVE-2022-42889"], manifest_path=Path("build.gradle"),
+        parent_target_version=None, threat_level=8, policy_name="Security-Critical",
+        cve_ids=["CVE-2022-42889"],
     )
     base.update(overrides)
     return Finding(**base)

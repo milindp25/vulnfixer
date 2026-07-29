@@ -69,7 +69,6 @@ def test_findings_from_policy_report_builds_findings_via_iq_client():
     assert finding.remediation_type == "next-non-failing"
     assert finding.parent_target_version == "2.0"
     assert finding.golden_version == "1.12.0"
-    assert finding.policy_action == "fail"
     assert finding.threat_level == 9
     assert finding.is_actionable is True
 

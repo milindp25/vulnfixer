@@ -104,10 +104,10 @@ def filter_findings(
 ) -> FilterResult:
     """Split findings into what the agent may fix, what a human must see, and noise.
 
-    The gate is the component's threat level, NOT `policy_action`: IQ's
-    `policyThreatCategory` is a category (SECURITY / LICENSE / QUALITY), never an
-    action like "Fail", so gating on it would drop everything. Each finding already
-    carries the HIGHEST threat level among that component's violations.
+    The gate is the component's threat level. IQ's `policyThreatCategory` is a
+    category (SECURITY / LICENSE / QUALITY), never an action like "Fail", so gating
+    on it would drop everything — it is not carried on Finding at all. Each finding
+    already holds the HIGHEST threat level among that component's violations.
     """
     actionable: list[Finding] = []
     escalate: list[Finding] = []

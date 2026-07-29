@@ -616,3 +616,65 @@ def test_the_unfiltered_report_count_stays_out_of_the_normal_run_log(caplog):
     collapsed = " ".join(caplog.text.split())
     for band in ("Critical (10)", "Severe (8-9)", "Moderate (4-7)", "Low (2-3)"):
         assert f"{band} 1 component(s)" in collapsed, band
+
+
+# --- remediation response: shape is UNVERIFIED against a live instance ------
+# If these field names are wrong, a component with a perfectly good next-no-violations
+# offer parses to zero version changes and is escalated as "no remediation". These lock
+# in that the failure is loud rather than silent, and that both wrappers are tolerated.
+
+
+def _remediation_response(payload):
+    session = MagicMock()
+    session.post.return_value = _status_response(payload)
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+    return client.fetch_remediation(
+        "app-1", {"format": "npm", "coordinates": {"packageId": "axios", "version": "1.0"}}, "build"
+    )
+
+
+_VERSION_CHANGE = {
+    "type": "next-no-violations",
+    "data": {"componentIdentifier": {"format": "npm", "coordinates": {"packageId": "axios", "version": "2.5.0"}}},
+}
+
+
+def test_version_changes_are_read_from_the_remediation_wrapper():
+    result = _remediation_response({"remediation": {"versionChanges": [_VERSION_CHANGE]}})
+    assert [(v.change_type, v.version) for v in result.version_changes] == [
+        ("next-no-violations", "2.5.0")
+    ]
+
+
+def test_version_changes_are_read_without_the_remediation_wrapper():
+    result = _remediation_response({"versionChanges": [_VERSION_CHANGE]})
+    assert result.version_changes[0].version == "2.5.0"
+
+
+def test_a_flat_version_field_is_also_accepted():
+    result = _remediation_response(
+        {"remediation": {"versionChanges": [{"type": "next-non-failing", "data": {"version": "3.1.0"}}]}}
+    )
+    assert result.version_changes[0].version == "3.1.0"
+
+
+def test_a_response_that_parses_to_nothing_warns_with_the_raw_body(caplog):
+    # The silent-escalation trap: IQ answered, this client understood none of it, and the
+    # component looks identical to one IQ had no fix for.
+    with caplog.at_level(logging.WARNING):
+        result = _remediation_response({"someOtherShape": [{"type": "next-no-violations"}]})
+
+    assert result.version_changes == []
+    assert "parsed to zero version changes" in caplog.text
+    assert "someOtherShape" in caplog.text, "the raw body must be in the log to diagnose it"
+
+
+def test_a_change_type_with_an_unreadable_version_warns(caplog):
+    with caplog.at_level(logging.WARNING):
+        result = _remediation_response(
+            {"remediation": {"versionChanges": [{"type": "next-no-violations", "data": {"v": "2.0"}}]}}
+        )
+
+    assert result.version_changes[0].version == ""
+    assert "no version this client could read" in caplog.text
+    assert "next-no-violations" in caplog.text

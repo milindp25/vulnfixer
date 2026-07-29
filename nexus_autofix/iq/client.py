@@ -530,16 +530,45 @@ class HTTPIQClient:
             params={"stageId": stage_id, "includeParentRemediation": "true"},
             json={"componentIdentifier": component_identifier},
         )
-        remediation = resp.json().get("remediation", {})
-        version_changes = [
-            VersionChange(
-                change_type=vc.get("type", ""),
-                version=vc.get("data", {}).get("componentIdentifier", {}).get("coordinates", {}).get(
-                    "version", vc.get("data", {}).get("version", "")
-                ),
+        body = resp.json()
+        # UNVERIFIED SHAPE. The nesting below (remediation -> versionChanges -> data ->
+        # componentIdentifier -> coordinates -> version) came from the design doc, not from
+        # a live response. If it is wrong, every component parses to zero versionChanges,
+        # select_target returns None, and the component is escalated as "no remediation
+        # offered" — indistinguishable from IQ genuinely having nothing. So: accept the
+        # payload with or without the "remediation" wrapper, take the version from
+        # whichever of the two known spellings is present, and shout with the raw body if
+        # a non-empty response yields nothing.
+        remediation = body.get("remediation") if isinstance(body, dict) else None
+        if not isinstance(remediation, dict):
+            remediation = body if isinstance(body, dict) else {}
+        raw_changes = remediation.get("versionChanges")
+        raw_changes = raw_changes if isinstance(raw_changes, list) else []
+
+        version_changes = []
+        for vc in raw_changes:
+            if not isinstance(vc, dict):
+                continue
+            data = vc.get("data") if isinstance(vc.get("data"), dict) else {}
+            coordinates = data.get("componentIdentifier", {}).get("coordinates", {})
+            version = (coordinates or {}).get("version") or data.get("version") or ""
+            version_changes.append(
+                VersionChange(change_type=vc.get("type", ""), version=str(version))
             )
-            for vc in remediation.get("versionChanges", [])
-        ]
+
+        if not version_changes and body:
+            log.warning(
+                "remediation response parsed to zero version changes. If IQ did offer an "
+                "upgrade here, this client is reading the wrong field names. Raw response:\n%s",
+                _truncate(body),
+            )
+        else:
+            missing = [vc.change_type for vc in version_changes if not vc.version]
+            if missing:
+                log.warning(
+                    "remediation offered type(s) %s with no version this client could "
+                    "read. Raw response:\n%s", missing, _truncate(body),
+                )
         parent = remediation.get("parentRemediation") or {}
         return RemediationResponse(
             version_changes=version_changes,

@@ -10,6 +10,7 @@ from pathlib import Path
 import click
 
 from nexus_autofix.agent.copilot_cli import CopilotCLIAgent
+from nexus_autofix.agent.interactive import InteractiveAgent
 from nexus_autofix.agent.mock import MockAgent, MockMode
 from nexus_autofix.config import ProjectConfig, Secrets, load_project_config, load_secrets
 from nexus_autofix.iq import remediation as remediation_mod
@@ -231,6 +232,7 @@ def perform_run(
     gate: str,
     dry_run: bool,
     mock_agent: bool,
+    interactive_agent: bool,
     config: ProjectConfig,
     secrets: Secrets,
     verbose: bool = False,
@@ -250,8 +252,8 @@ def perform_run(
     fix_branch = f"autofix/nexus/{run_id}"
     log_file = configure_logging(run_dir / "nexusfix.log", verbose=verbose)
 
-    log.info("run %s starting: app_id=%s branch=%s gate=%s dry_run=%s mock_agent=%s",
-             run_id, app_id, branch, gate, dry_run, mock_agent)
+    log.info("run %s starting: app_id=%s branch=%s gate=%s dry_run=%s mock_agent=%s interactive_agent=%s",
+             run_id, app_id, branch, gate, dry_run, mock_agent, interactive_agent)
     log.info("full DEBUG log (incl. every IQ request/response body): %s", log_file)
     log.debug("TLS: OS trust store %s", try_enable_os_trust_store())
     warn_if_insecure()
@@ -313,7 +315,14 @@ def perform_run(
     # --mock-agent a genuine smoke test of every real step up to and including agent
     # invocation (IQ discovery, mirror, worktree, toolchain resolution) without needing
     # the Copilot CLI installed.
-    agent = MockAgent(mode=MockMode.NO_CHANGES) if mock_agent else CopilotCLIAgent()
+    if mock_agent:
+        agent = MockAgent(mode=MockMode.NO_CHANGES)
+    elif interactive_agent:
+        # For orgs whose Copilot policy blocks unattended tool use: prepare everything,
+        # then hand the keyboard over. Verification and publishing are unchanged.
+        agent = InteractiveAgent()
+    else:
+        agent = CopilotCLIAgent()
     log.info("agent backend: %s", type(agent).__name__)
 
     run_config = RunConfig(
@@ -425,6 +434,11 @@ def _echo_findings(label: str, findings: list[Finding]) -> None:
 @click.option("--gate", default=None, type=click.Choice(["none", "pre-pr", "pre-push"]))
 @click.option("--dry-run", is_flag=True, default=False)
 @click.option("--mock-agent", is_flag=True, default=False)
+@click.option(
+    "--interactive-agent", is_flag=True, default=False,
+    help="Prepare the worktree and prompt, then pause so you can run the coding agent "
+         "by hand. Use when your org's Copilot policy blocks unattended tool use.",
+)
 @click.option("-v", "--verbose", is_flag=True, default=False,
               help="Echo full IQ request/response bodies to the console (always in the log file).")
 def run_command(
@@ -472,6 +486,7 @@ def run_command(
             gate=effective_gate,
             dry_run=dry_run,
             mock_agent=mock_agent,
+            interactive_agent=interactive_agent,
             config=config,
             secrets=secrets,
             verbose=verbose,

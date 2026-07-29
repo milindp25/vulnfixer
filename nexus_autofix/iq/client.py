@@ -181,6 +181,23 @@ def _threat_level_of(violation: dict) -> int:
     return 0
 
 
+def _severity_band(threat_level: int) -> str:
+    """Nexus IQ's own severity bands for a 0-10 policy threat level.
+
+    Only here so the log can be read against the IQ report page without translating
+    numbers in your head. Nothing branches on it — the gate is the raw number.
+    """
+    if threat_level >= 10:
+        return "Critical (10)"
+    if threat_level >= 8:
+        return "Severe (8-9)"
+    if threat_level >= 4:
+        return "Moderate (4-7)"
+    if threat_level >= 2:
+        return "Low (2-3)"
+    return "Info (0-1)"
+
+
 def _clean_component_name(component: dict) -> str:
     """A bare component name, with no version glued on.
 
@@ -469,9 +486,21 @@ class HTTPIQClient:
             for component in components
             if (worst := _worst_violation_for_component(component)) is not None
         ]
-        log.info(
-            "IQ policy report %s: %d component(s) with violations", report_id, len(violations)
+        # DEBUG, not INFO. This is EVERY component carrying any violation at any threat
+        # level — the whole IQ report page, most of it far below the bar for an automated
+        # fix. Putting it at INFO made the run announce a big number it had no intention
+        # of acting on. The caller logs the count that matters, after gating.
+        log.debug(
+            "IQ policy report %s: %d component(s) with at least one violation, at all "
+            "threat levels (unfiltered)", report_id, len(violations),
         )
+        by_band: dict[str, int] = {}
+        for violation in violations:
+            band = _severity_band(violation.threat_level)
+            by_band[band] = by_band.get(band, 0) + 1
+        for band in ("Critical (10)", "Severe (8-9)", "Moderate (4-7)", "Low (2-3)", "Info (0-1)"):
+            if by_band.get(band):
+                log.debug("    %-15s %d component(s)", band, by_band[band])
         for violation in violations:
             log.debug(
                 "  %s threat=%s policy=%s waived=%s",

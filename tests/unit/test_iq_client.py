@@ -584,3 +584,35 @@ def test_a_failed_post_logs_the_request_body_that_was_rejected(caplog):
     logged = caplog.text
     assert "invalid component identifier packageUrl" in logged, "IQ's objection"
     assert "%40scope/pkg" in logged, "and what it objected to"
+
+
+def test_the_unfiltered_report_count_stays_out_of_the_normal_run_log(caplog):
+    # A 1400-component app violates some policy on dozens of components while only a
+    # couple are worth fixing. Announcing the big number at INFO made the run look like
+    # it had 84 things to do. It is DEBUG now; the caller logs the post-gate count.
+    session = MagicMock()
+    session.get.return_value = _status_response(_live_report([
+        {"packageUrl": "pkg:npm/a@1.0", "displayName": "a : 1.0",
+         "violations": [{"policyName": "EOL", "policyThreatLevel": 5}]},
+        {"packageUrl": "pkg:npm/b@1.0", "displayName": "b : 1.0",
+         "violations": [{"policyName": "Sec", "policyThreatLevel": 9}]},
+        {"packageUrl": "pkg:npm/c@1.0", "displayName": "c : 1.0",
+         "violations": [{"policyName": "Sec", "policyThreatLevel": 10}]},
+        {"packageUrl": "pkg:npm/d@1.0", "displayName": "d : 1.0",
+         "violations": [{"policyName": "Lic", "policyThreatLevel": 2}]},
+    ]))
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    with caplog.at_level(logging.INFO):
+        violations = client.fetch_policy_report("demo", "rep-1")
+    assert "component(s) with at least one violation" not in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        violations = client.fetch_policy_report("demo", "rep-1")
+
+    assert len(violations) == 4, "every violating component is returned; gating happens later"
+    assert "at all threat levels (unfiltered)" in caplog.text
+    collapsed = " ".join(caplog.text.split())
+    for band in ("Critical (10)", "Severe (8-9)", "Moderate (4-7)", "Low (2-3)"):
+        assert f"{band} 1 component(s)" in collapsed, band

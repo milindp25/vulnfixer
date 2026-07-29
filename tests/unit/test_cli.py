@@ -191,3 +191,25 @@ def test_iq_identifier_is_preferred_over_one_rebuilt_from_the_purl():
 
     assert client.calls[0]["coordinates"]["packageId"] == "@dfs-react-ui/core"
     assert "%40" not in client.calls[0]["coordinates"]["packageId"]
+
+
+def test_each_remediation_post_is_logged_with_its_component_and_body(caplog):
+    # So a run's POSTs can be tied to components and replayed by hand, without DEBUG.
+    import logging as _logging
+
+    client = _CountingClient()
+    violations = [
+        _violation(threat_level=5, component="eol-thing"),
+        _violation(threat_level=9, component="axios"),
+        _violation(threat_level=10, component="lodash", component_identifier={
+            "format": "npm", "coordinates": {"packageId": "lodash", "version": "4.17.20"}}),
+    ]
+
+    with caplog.at_level(_logging.INFO):
+        findings_from_policy_report(client, "app-1", violations, "build", min_threat_level=8)
+
+    assert "remediation lookup 1/2: axios (threat 9)" in caplog.text
+    assert "remediation lookup 2/2: lodash (threat 10)" in caplog.text
+    assert '{"componentIdentifier": {"format": "npm"' in caplog.text
+    assert "eol-thing" not in caplog.text, "skipped components must not appear as lookups"
+    assert "2 POST(s) sent, 1 skipped" in caplog.text

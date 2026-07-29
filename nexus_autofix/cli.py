@@ -125,6 +125,10 @@ def findings_from_policy_report(
     """
     findings = []
     skipped = 0
+    looked_up = 0
+    expected = sum(
+        1 for v in violations if not v.is_waived and v.threat_level >= min_threat_level
+    )
     for v in violations:
         if v.is_waived:
             findings.append(_finding_without_remediation(v, "waived in IQ"))
@@ -142,6 +146,14 @@ def findings_from_policy_report(
         # purl_to_component_identifier for why the rebuild is lossy.
         identifier = getattr(v, "component_identifier", None) or purl_to_component_identifier(
             v.package_url
+        )
+        # Named at INFO, with the exact body, so every POST in the log can be tied to a
+        # component and replayed by hand in Postman/curl without turning DEBUG on.
+        looked_up += 1
+        log.info(
+            "remediation lookup %d/%d: %s (threat %d)  body=%s",
+            looked_up, expected, v.component, v.threat_level,
+            json.dumps({"componentIdentifier": identifier}, default=str),
         )
         try:
             remediation = iq_client.fetch_remediation(internal_id, identifier, stage_id)
@@ -181,12 +193,8 @@ def findings_from_policy_report(
                 golden_version=remediation.golden_version,
             )
         )
-    if skipped:
-        log.info(
-            "skipped remediation lookup for %d component(s) that cannot be acted on "
-            "(waived, or below threat level %d) — %d lookup(s) actually sent",
-            skipped, min_threat_level, len(violations) - skipped,
-        )
+    log.info("remediation: %d POST(s) sent, %d skipped as below the bar or waived",
+             looked_up, skipped)
     return findings
 
 
@@ -265,15 +273,29 @@ def perform_run(
     )
     baseline_report_id = iq_client.poll_evaluation(status_url, config.poll_timeout_seconds)
     violations = iq_client.fetch_policy_report(app_id, baseline_report_id)
-    log.info("baseline report %s: %d policy violation(s)", baseline_report_id, len(violations))
 
+    # The headline is what will be worked on, not what the report contains. Everything
+    # below the bar is counted in one trailing clause and otherwise stays out of the way;
+    # run with -v if you ever want the full breakdown.
+    candidates = [
+        v for v in violations if v.threat_level >= config.min_threat_level and not v.is_waived
+    ]
     log.info(
-        "fetching remediation advice (threat level >= %d only)...", config.min_threat_level
+        "baseline report %s: %d component(s) to fix at threat level >= %d "
+        "(%d further violating component(s) below that bar, ignored — raise or lower it "
+        "with min_threat_level in config.yml)",
+        baseline_report_id, len(candidates), config.min_threat_level,
+        len(violations) - len(candidates),
     )
+    for v in candidates:
+        log.info("  to fix: %s %s threat=%d (%s)",
+                 v.component, v.current_version, v.threat_level, v.policy_name)
     findings = findings_from_policy_report(
         iq_client, internal_id, violations, config.default_stage_id, config.min_threat_level
     )
     for f in findings:
+        if f.threat_level < config.min_threat_level or f.is_waived:
+            continue
         log.info("  finding: %s %s -> %s (%s)",
                  f.component, f.current_version, f.target_version or "no remediation",
                  f.remediation_type or "n/a")

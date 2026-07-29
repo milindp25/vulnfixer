@@ -107,6 +107,33 @@ def _extract_status(body: dict) -> str | None:
     return None
 
 
+#: Trailing path segments IQ appends to a report URL — the id sits *before* these.
+_REPORT_URL_SUFFIXES = {"raw", "policy", "pdf", "printreport", "json", "dependencies"}
+
+
+def _report_id_from_url(url: object) -> str:
+    """Pull the report id out of a report URL.
+
+    VERIFIED AGAINST A LIVE INSTANCE: `reportDataUrl` looks like
+    ``api/v2/applications/<publicId>/reports/<reportId>/raw`` — it ends in ``/raw``, so
+    simply taking the last path segment yields the literal string "raw", and the policy
+    URL built from it (``.../reports/raw/policy``) 404s. The id is the segment following
+    ``reports``/``report``; the html variant (``ui/links/application/<publicId>/report/<reportId>``)
+    has no trailing suffix at all, which is why matching on the marker beats stripping
+    a suffix.
+    """
+    parts = [segment for segment in str(url).split("?")[0].rstrip("/").split("/") if segment]
+    for marker in ("reports", "report"):
+        if marker in parts:
+            index = parts.index(marker)
+            if index + 1 < len(parts):
+                return parts[index + 1]
+    # No recognisable marker: fall back to dropping a known trailing suffix.
+    if len(parts) >= 2 and parts[-1].lower() in _REPORT_URL_SUFFIXES:
+        return parts[-2]
+    return parts[-1] if parts else ""
+
+
 def _extract_error_message(body: dict) -> str:
     for field in _ERROR_MESSAGE_FIELDS:
         value = body.get(field)
@@ -246,7 +273,7 @@ class HTTPIQClient:
 
             report_url = last_body.get("reportDataUrl") or last_body.get("reportHtmlUrl")
             if report_url:
-                report_id = str(report_url).rstrip("/").rsplit("/", 1)[-1]
+                report_id = _report_id_from_url(report_url)
                 log.info(
                     "IQ evaluation complete after %d poll(s) (status=%s); report id: %s",
                     attempt, status or "n/a", report_id,

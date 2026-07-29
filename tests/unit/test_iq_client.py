@@ -7,6 +7,7 @@ from nexus_autofix.iq.client import (
     HTTPIQClient,
     IQEvaluationError,
     IQTimeoutError,
+    _report_id_from_url,
     PolicyViolation,
     RemediationResponse,
     VersionChange,
@@ -222,3 +223,51 @@ def test_normalised_status_url_joins_onto_the_base_url_correctly():
         client.poll_evaluation(status_url, timeout_seconds=60)
 
     assert session.get.call_args.args[0] == "https://iq.example.com/api/v2/scan/status/1"
+
+
+# --- report id extraction (the /raw 404) ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        # reportDataUrl — ends in /raw, which is what broke the policy fetch.
+        ("api/v2/applications/test-demo/reports/a1b2c3d4e5/raw", "a1b2c3d4e5"),
+        ("/api/v2/applications/test-demo/reports/a1b2c3d4e5/raw", "a1b2c3d4e5"),
+        ("https://iq.example.com/api/v2/applications/demo/reports/a1b2c3d4e5/raw", "a1b2c3d4e5"),
+        # reportHtmlUrl — singular "report", no trailing suffix.
+        ("ui/links/application/test-demo/report/a1b2c3d4e5", "a1b2c3d4e5"),
+        # other suffixes IQ appends
+        ("api/v2/applications/demo/reports/a1b2c3d4e5/policy", "a1b2c3d4e5"),
+        ("api/v2/applications/demo/reports/a1b2c3d4e5/printReport", "a1b2c3d4e5"),
+        # trailing slash, query string
+        ("api/v2/applications/demo/reports/a1b2c3d4e5/raw/", "a1b2c3d4e5"),
+        ("api/v2/applications/demo/reports/a1b2c3d4e5/raw?foo=bar", "a1b2c3d4e5"),
+    ],
+)
+def test_report_id_is_extracted_not_just_the_last_segment(url, expected):
+    assert _report_id_from_url(url) == expected
+
+
+def test_poll_returns_the_report_id_not_the_word_raw():
+    session = MagicMock()
+    session.get.return_value = _status_response(
+        {"status": "COMPLETED", "reportDataUrl": "api/v2/applications/demo/reports/rep-42/raw"}
+    )
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    with patch("nexus_autofix.iq.client.time.sleep"):
+        assert client.poll_evaluation("/status/1", timeout_seconds=60) == "rep-42"
+
+
+def test_policy_report_url_is_built_from_the_real_report_id():
+    session = MagicMock()
+    session.get.return_value = _status_response([])
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    client.fetch_policy_report("test-demo", "rep-42")
+
+    assert (
+        session.get.call_args.args[0]
+        == "https://iq.example.com/api/v2/applications/test-demo/reports/rep-42/policy"
+    )

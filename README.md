@@ -76,15 +76,35 @@ current directory.
 
 **`check` verifies, `publish` ships.** `check` is more than the tests: the diff classification
 runs *first*, before anything is built, because a diff that disables tests would build and pass
-trivially.
+trivially — so checking after the build would bless exactly what the check exists to catch.
 
-**Who commits:** `publish` does — not you, not the agent. It commits only after the diff check,
-the build and the tests have passed, so nothing half-verified reaches the branch. If something
-committed in the worktree early, nothing breaks: `check` and `publish` diff from the commit the
-worktree was created at, not from `HEAD`.
+**Nothing runs by itself.** Somebody has to invoke each command — either you, or the coding
+agent following [RUNBOOK.md](RUNBOOK.md). Nothing is pushed and no PR is opened until `publish`
+is run.
 
-**Where to review:** run `check`, read `git diff` in the worktree, then `publish` when you're
-happy. `publish` is the first thing that touches the remote.
+**Who makes the git commit:** `publish` does. You don't `git commit` in the worktree, and the
+agent is told not to. `publish` commits only after the diff check, the build and the tests have
+passed, so nothing half-verified reaches the branch. (If something did commit early, nothing
+breaks — `check` and `publish` diff from the commit the worktree was created at, not from
+`HEAD`.)
+
+**Why `check` before `publish`:** `publish` refuses to run without a passing verdict that
+`check` itself wrote. The point is that the party asking to publish is the same one that made
+the changes, so its own assurance is worth nothing — the verdict has to come from a real build
+and a real diff classification, not from anyone's say-so.
+
+### The usual sequence
+
+| Step | Who does it | What happens |
+|---|---|---|
+| 1 | you | `nexusfix discover` — nothing is modified |
+| 2 | you or the agent | edit the manifest in `wt/`, leave it uncommitted |
+| 3 | you or the agent | `nexusfix check --run-id …` — diff check, build, tests |
+| 4 | you | read `git diff` in `wt/` — this is your review point |
+| 5 | you or the agent | `nexusfix publish --run-id …` — commit, push, rescan, PR |
+
+Step 5 is the first thing that touches the remote. Stop after step 3 and nothing has left your
+machine.
 
 Add `-v` to any command for full IQ request/response bodies on the console. They're always in
 `<workspace_root>/runs/<run-id>/nexusfix.log` regardless. Credentials are never logged.

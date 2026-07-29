@@ -17,8 +17,7 @@ def _finding(**overrides) -> Finding:
     base = dict(
         component="x", package_url="pkg:maven/x/x@1.0", current_version="1.0.0", target_version="1.0.1",
         remediation_type="next-non-failing-with-dependencies", is_direct=True, dependency_path=[],
-        parent_component=None, parent_current_version=None, parent_target_version=None,
-        policy_action="Fail", threat_level=8, policy_name="p", cve_ids=[], manifest_path=Path("x"),
+        parent_component=None, parent_current_version=None, parent_target_version=None, threat_level=8, policy_name="p", cve_ids=[],
     )
     base.update(overrides)
     return Finding(**base)

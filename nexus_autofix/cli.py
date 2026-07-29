@@ -32,7 +32,6 @@ from nexus_autofix.repo.descriptor import read_descriptor, unexpired_suppression
 from nexus_autofix.repo.workspace import (
     clone_or_update_mirror,
     create_worktree,
-    current_commit_sha,
     remove_worktree,
     resolve_branch_commit_sha,
 )
@@ -44,8 +43,6 @@ from nexus_autofix.verify import rescan as rescan_mod
 log = logging.getLogger(__name__)
 
 _PURL_RE = re.compile(r"^pkg:(?P<type>[^/]+)/(?P<rest>[^@]+)@(?P<version>.+)$")
-
-_DESIGN_DOC = "docs/superpowers/specs/2026-07-28-nexus-autofix-design.md"
 
 
 def _owner_repo_from_url(repo_url: str) -> tuple[str, str]:
@@ -108,11 +105,9 @@ def _finding_without_remediation(v, reason: str) -> Finding:
         parent_component=None,
         parent_current_version=None,
         parent_target_version=None,
-        policy_action=v.action,
         threat_level=v.threat_level,
         policy_name=v.policy_name,
         cve_ids=[],
-        manifest_path=None,
         is_waived=v.is_waived,
         escalation_reason=reason,
     )
@@ -219,12 +214,10 @@ def findings_from_policy_report(
                 parent_component=remediation.parent_component,
                 parent_current_version=remediation.parent_current_version,
                 parent_target_version=remediation.parent_target_version,
-                policy_action=v.action,
-                threat_level=v.threat_level,
+                        threat_level=v.threat_level,
                 policy_name=v.policy_name,
                 cve_ids=[],
-                manifest_path=None,
-                is_waived=v.is_waived,
+                        is_waived=v.is_waived,
                 golden_version=remediation.golden_version,
             )
         )
@@ -659,9 +652,8 @@ def _agent_json(payload: object) -> None:
 @main.command("discover")
 @click.option("--app-id", default=None, help="IQ public application ID. Defaults to $NEXUSFIX_APP_ID.")
 @click.option("--branch", default=None, help="Branch to scan. Defaults to $NEXUSFIX_BRANCH.")
-@click.option("--json", "as_json_flag", is_flag=True, default=True, help="Emit JSON (default).")
 @click.option("-v", "--verbose", is_flag=True, default=False)
-def discover_command(app_id: str | None, branch: str | None, as_json_flag: bool, verbose: bool):
+def discover_command(app_id: str | None, branch: str | None, verbose: bool):
     """Find what needs fixing and prepare a worktree, without touching the agent.
 
     Prints the findings and the worktree path as JSON. Nothing is committed or pushed.

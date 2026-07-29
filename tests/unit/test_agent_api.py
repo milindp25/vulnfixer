@@ -103,8 +103,8 @@ def _finding(**overrides):
         component="postcss", package_url="pkg:npm/postcss@8.5.10", current_version="8.5.10",
         target_version="8.5.18", remediation_type="next-no-violations", is_direct=False,
         dependency_path=["pkg:npm/parent@1.0"], parent_component=None,
-        parent_current_version=None, parent_target_version=None, policy_action="SECURITY",
-        threat_level=9, policy_name="Security-High", cve_ids=[], manifest_path=None,
+        parent_current_version=None, parent_target_version=None,
+        threat_level=9, policy_name="Security-High", cve_ids=[],
     )
     base.update(overrides)
     return Finding(**base)

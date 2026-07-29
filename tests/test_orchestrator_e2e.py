@@ -94,11 +94,9 @@ def _finding() -> Finding:
         parent_component=None,
         parent_current_version=None,
         parent_target_version=None,
-        policy_action="Fail",
         threat_level=8,
         policy_name="Security-Critical",
         cve_ids=["CVE-2022-42889"],
-        manifest_path=Path("build.gradle"),
     )
 
 

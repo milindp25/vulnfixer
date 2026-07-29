@@ -1,5 +1,4 @@
 import subprocess
-from pathlib import Path
 
 from nexus_autofix.agent.base import changed_files_from_git
 

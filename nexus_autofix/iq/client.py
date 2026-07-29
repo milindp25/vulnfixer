@@ -115,8 +115,8 @@ def _truncate(text: object, limit: int = 4000) -> str:
 
 
 def _extract_status(body: dict) -> str | None:
-    for field in _STATUS_FIELDS:
-        value = body.get(field)
+    for name in _STATUS_FIELDS:
+        value = body.get(name)
         if isinstance(value, str) and value.strip():
             return value.strip().upper().replace(" ", "_")
     return None
@@ -299,8 +299,8 @@ def _worst_violation_for_component(component: dict) -> PolicyViolation | None:
 
 
 def _extract_error_message(body: dict) -> str:
-    for field in _ERROR_MESSAGE_FIELDS:
-        value = body.get(field)
+    for name in _ERROR_MESSAGE_FIELDS:
+        value = body.get(name)
         if isinstance(value, str) and value.strip():
             return value.strip()
     return "no error message supplied by IQ"

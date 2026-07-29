@@ -11,7 +11,7 @@ Replace `nexusfix` below with the path to the executable if it is not on your PA
 ## Step 1 — Discover what needs fixing
 
 ```
-nexusfix discover --json
+nexusfix discover
 ```
 
 This talks to Nexus IQ, scans the branch, works out which components need upgrading and
@@ -78,7 +78,7 @@ re-running will not change that.
 ## Step 3 — Verify
 
 ```
-nexusfix check --run-id <run_id from step 1> --json
+nexusfix check --run-id <run_id from step 1>
 ```
 
 This classifies the diff, then runs the real build and tests. It prints:
@@ -99,7 +99,7 @@ attempts, stop and report what failed — do not force it through.
 ## Step 4 — Publish
 
 ```
-nexusfix publish --run-id <run_id> --json
+nexusfix publish --run-id <run_id>
 ```
 
 This commits, pushes the fix branch, rescans it in Nexus IQ to confirm the findings are

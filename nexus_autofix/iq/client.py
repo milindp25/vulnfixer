@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import requests
@@ -39,6 +39,21 @@ class PolicyViolation:
     constraint_summary: str
     is_waived: bool
     action: str
+    #: IQ's own `componentIdentifier` object, copied out of the policy report verbatim and
+    #: handed straight back to the remediation endpoint. Reconstructing it by parsing the
+    #: purl gets scoped npm packages wrong — the purl percent-encodes the leading "@"
+    #: (`pkg:npm/%40dfs-react-ui/core@1.4.6`) while IQ's coordinates carry the decoded
+    #: `@dfs-react-ui/core`, so a rebuilt identifier finds no remediation.
+    component_identifier: dict = field(default_factory=dict)
+    #: `componentIdentifier.coordinates.version` — authoritative, unlike a purl suffix.
+    current_version: str = ""
+    #: `dependencyData.directDependency`. A transitive component cannot be bumped in the
+    #: manifest directly; the agent has to move whichever parent pulls it in.
+    is_direct: bool = True
+    #: `dependencyData.parentComponentPurls` — who pulls this in, for the agent prompt.
+    parent_purls: list[str] = field(default_factory=list)
+    #: `displayName`, e.g. "hasown : 2.0.2" — for humans (PR body), not for matching.
+    display_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -154,14 +169,40 @@ def _components_from_policy_report(body: object) -> list[dict]:
 
 
 def _threat_level_of(violation: dict) -> int:
-    """VERIFIED AGAINST A LIVE INSTANCE: the field is ``policyThreatLevel``."""
-    for field in ("policyThreatLevel", "threatLevel"):
-        value = violation.get(field)
+    """VERIFIED AGAINST A LIVE INSTANCE: the field is ``policyThreatLevel``, an int."""
+    for name in ("policyThreatLevel", "threatLevel"):
+        value = violation.get(name)
+        if isinstance(value, bool):
+            continue
         if isinstance(value, (int, float)):
             return int(value)
         if isinstance(value, str) and value.strip().isdigit():
             return int(value.strip())
     return 0
+
+
+def _clean_component_name(component: dict) -> str:
+    """A bare component name, with no version glued on.
+
+    ``displayName`` is a human string — "hasown : 2.0.2", with spaces around the colon
+    and the version baked in — so it can never match a plain name in the suppression
+    list, and reads badly in a branch or PR title. The coordinates carry the real name.
+    """
+    coordinates = component.get("componentIdentifier", {}).get("coordinates", {})
+    if isinstance(coordinates, dict):
+        group_id = coordinates.get("groupId")
+        artifact_id = coordinates.get("artifactId")
+        if group_id and artifact_id:
+            return f"{group_id}:{artifact_id}"
+        for key in ("artifactId", "packageId", "name"):
+            value = coordinates.get(key)
+            if isinstance(value, str) and value:
+                return value
+    display_name = component.get("displayName")
+    if isinstance(display_name, str) and display_name:
+        # Last resort: strip the " : <version>" tail off the human string.
+        return display_name.split(" : ")[0].strip()
+    return str(component.get("packageUrl") or "")
 
 
 def _worst_violation_for_component(component: dict) -> PolicyViolation | None:
@@ -181,7 +222,13 @@ def _worst_violation_for_component(component: dict) -> PolicyViolation | None:
         return None
 
     def is_waived(violation: dict) -> bool:
-        return bool(violation.get("waived") or violation.get("grandfathered"))
+        # `waivedWithAutoWaiver` is a separate flag from `waived` in the live payload —
+        # missing it would re-fix something a waiver already settled.
+        return bool(
+            violation.get("waived")
+            or violation.get("waivedWithAutoWaiver")
+            or violation.get("grandfathered")
+        )
 
     considered = [v for v in violations if not is_waived(v)]
     all_waived = not considered
@@ -200,9 +247,21 @@ def _worst_violation_for_component(component: dict) -> PolicyViolation | None:
         if isinstance(constraints, list)
         else ""
     )
+
+    identifier = component.get("componentIdentifier")
+    identifier = identifier if isinstance(identifier, dict) else {}
+    coordinates = identifier.get("coordinates")
+    coordinates = coordinates if isinstance(coordinates, dict) else {}
+
+    dependency_data = component.get("dependencyData")
+    dependency_data = dependency_data if isinstance(dependency_data, dict) else {}
+    parent_purls = dependency_data.get("parentComponentPurls")
+    # A list of plain purl STRINGS in the live payload, not objects.
+    parent_purls = [p for p in parent_purls if isinstance(p, str)] if isinstance(parent_purls, list) else []
+
     return PolicyViolation(
         package_url=package_url,
-        component=component.get("displayName") or package_url,
+        component=_clean_component_name(component),
         policy_name=worst.get("policyName", ""),
         policy_id=worst.get("policyId", ""),
         threat_level=_threat_level_of(worst),
@@ -212,6 +271,13 @@ def _worst_violation_for_component(component: dict) -> PolicyViolation | None:
         # action like "Fail" — kept for the PR body, but the actionable/ignore decision
         # is made on threat level, not on this.
         action=worst.get("policyThreatCategory", ""),
+        component_identifier=identifier,
+        current_version=str(coordinates.get("version") or ""),
+        # Absent means direct: only a component IQ positively marks transitive gets the
+        # more conservative parent-bump treatment.
+        is_direct=dependency_data.get("directDependency") is not False,
+        parent_purls=parent_purls,
+        display_name=str(component.get("displayName") or ""),
     )
 
 

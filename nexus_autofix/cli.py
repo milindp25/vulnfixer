@@ -50,7 +50,15 @@ def purl_version(purl: str) -> str:
 
 
 def purl_to_component_identifier(purl: str) -> dict:
-    """Convert a package URL into the componentIdentifier shape the IQ remediation API expects."""
+    """Convert a package URL into the componentIdentifier shape the IQ remediation API expects.
+
+    FALLBACK ONLY. The policy report hands back IQ's own `componentIdentifier` for every
+    component, and that is what `findings_from_policy_report` uses. This reconstruction
+    is lossy: a purl percent-encodes the "@" of a scoped npm package
+    (`pkg:npm/%40dfs-react-ui/core@1.4.6`), so the packageId rebuilt here is
+    "%40dfs-react-ui/core" where IQ expects "@dfs-react-ui/core". Only reached when a
+    violation carries no identifier of its own.
+    """
     match = _PURL_RE.match(purl)
     if not match:
         return {"format": "unknown", "coordinates": {}}
@@ -75,18 +83,22 @@ def findings_from_policy_report(iq_client, internal_id: str, violations, stage_i
     """Turn IQ policy violations into Findings, fetching remediation advice for each."""
     findings = []
     for v in violations:
-        identifier = purl_to_component_identifier(v.package_url)
+        # Prefer IQ's own identifier over one rebuilt from the purl — see
+        # purl_to_component_identifier for why the rebuild is lossy.
+        identifier = getattr(v, "component_identifier", None) or purl_to_component_identifier(
+            v.package_url
+        )
         remediation = iq_client.fetch_remediation(internal_id, identifier, stage_id)
         version_change = remediation_mod.select_target(remediation)
         findings.append(
             Finding(
                 component=v.component,
                 package_url=v.package_url,
-                current_version=purl_version(v.package_url),
+                current_version=getattr(v, "current_version", "") or purl_version(v.package_url),
                 target_version=version_change.version if version_change else None,
                 remediation_type=version_change.change_type if version_change else None,
-                is_direct=True,
-                dependency_path=[],
+                is_direct=getattr(v, "is_direct", True),
+                dependency_path=list(getattr(v, "parent_purls", []) or []),
                 parent_component=remediation.parent_component,
                 parent_current_version=remediation.parent_current_version,
                 parent_target_version=remediation.parent_target_version,

@@ -385,3 +385,169 @@ def test_a_bare_list_response_is_still_accepted():
     )
     client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
     assert client.fetch_policy_report("demo", "rep-1")[0].threat_level == 9
+
+
+# --------------------------------------------------------------------------------------
+# Transcribed from a real /policy response off the user's Nexus IQ instance. Every key and
+# nesting level below was read off that payload, not inferred. Keep it verbatim: it is the
+# only record in the repo of what the endpoint actually returns.
+# --------------------------------------------------------------------------------------
+
+_LIVE_SCOPED_NPM_COMPONENT = {
+    "packageUrl": "pkg:npm/%40charlietango/use-focus-trap@1.4.0",
+    "hash": "003eaf91be7adc372e84",
+    "componentIdentifier": {
+        "format": "npm",
+        "coordinates": {"packageId": "@charlietango/use-focus-trap", "version": "1.4.0"},
+    },
+    "displayName": "@charlietango/use-focus-trap : 1.4.0",
+    "proprietary": False,
+    "matchState": "exact",
+    "pathnames": ["5a3e2e892a64405288e517265a5e5e4d/yarn.lock/@charlietango\\use-focus-trap:1.4.0"],
+    "dependencyData": {
+        "directDependency": False,
+        "innerSource": False,
+        "parentComponentPurls": ["pkg:npm/%40dfs-react-ui/core@1.4.6"],
+        "innerSourceData": [
+            {
+                "ownerApplicationName": "digital-web-platform-ui-library",
+                "ownerApplicationId": "b250bf2726754784946ab14e49d4f89e",
+                "innerSourceComponentPurl": "pkg:npm/%40dfs-react-ui/core@1.4.6",
+            }
+        ],
+    },
+    "violations": [
+        {
+            "policyId": "e99c9ad11cea421b892e6a279b0d758b",
+            "policyName": "End-Of-Life Component",
+            "policyThreatCategory": "QUALITY",
+            "policyThreatLevel": 5,
+            "policyViolationId": "7b4da0b545e14cf4a1c69afaa7eaf5ad",
+            "waived": False,
+            "waivedWithAutoWaiver": False,
+            "grandfathered": False,
+            "legacyViolation": False,
+            "constraints": [
+                {
+                    "constraintId": "1664c6bea1f44bd0bb893a799fa4c155",
+                    "constraintName": "EOL",
+                    "conditions": [
+                        {
+                            "conditionSummary": "End of Life is true",
+                            "conditionReason": "Component status is End-of-Life (EOL)",
+                        }
+                    ],
+                }
+            ],
+        }
+    ],
+}
+
+
+def _live_report(components):
+    """The real envelope: report metadata, a `counts` object, then `components`."""
+    return {
+        "reportTime": 1785334499538,
+        "reportTitle": "Build Report",
+        "commitHash": "d63e26acecd8e44513d3e15e565117bf36a5abbc",
+        "initiator": "system",
+        "application": {
+            "id": "5a3e2e892a64405288e517265a5e5e4d",
+            "publicId": "boardingwizard-static",
+            "name": "boardingwizard-static",
+            "organizationId": "07bd72d61caf4693a5a5e1890391a3b0",
+            "contactUserName": None,
+        },
+        "counts": {
+            "partiallyMatchedComponentCount": 0,
+            "exactlyMatchedComponentCount": 1400,
+            "totalComponentCount": 1400,
+            "grandfatheredPolicyViolationCount": 0,
+            "legacyViolationCount": 0,
+        },
+        "components": components,
+    }
+
+
+def _live_violation():
+    session = MagicMock()
+    session.get.return_value = _status_response(_live_report([_LIVE_SCOPED_NPM_COMPONENT]))
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+    return client.fetch_policy_report("boardingwizard-static", "rep-1")[0]
+
+
+def test_iq_component_identifier_is_carried_through_verbatim():
+    # Rebuilding it from the purl gives packageId "%40charlietango/use-focus-trap" —
+    # percent-encoded — and the remediation lookup finds nothing.
+    assert _live_violation().component_identifier == {
+        "format": "npm",
+        "coordinates": {"packageId": "@charlietango/use-focus-trap", "version": "1.4.0"},
+    }
+
+
+def test_component_name_is_the_bare_coordinate_not_the_display_string():
+    violation = _live_violation()
+    assert violation.component == "@charlietango/use-focus-trap"
+    assert violation.display_name == "@charlietango/use-focus-trap : 1.4.0"
+
+
+def test_current_version_comes_from_coordinates():
+    assert _live_violation().current_version == "1.4.0"
+
+
+def test_transitive_dependency_is_not_reported_as_direct():
+    violation = _live_violation()
+    assert violation.is_direct is False
+    assert violation.parent_purls == ["pkg:npm/%40dfs-react-ui/core@1.4.6"]
+
+
+def test_a_component_with_no_dependency_data_defaults_to_direct():
+    session = MagicMock()
+    session.get.return_value = _status_response(
+        _live_report([{
+            "packageUrl": "pkg:maven/x/y@1.0",
+            "componentIdentifier": {
+                "format": "maven",
+                "coordinates": {"groupId": "x", "artifactId": "y", "version": "1.0"},
+            },
+            "violations": [{"policyName": "S", "policyThreatLevel": 9}],
+        }])
+    )
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+    violation = client.fetch_policy_report("demo", "rep-1")[0]
+    assert violation.is_direct is True
+    assert violation.component == "x:y"
+
+
+def test_auto_waived_violations_are_treated_as_waived():
+    session = MagicMock()
+    session.get.return_value = _status_response(
+        _live_report([{
+            "packageUrl": "pkg:npm/z@1.0", "displayName": "z : 1.0",
+            "violations": [
+                {"policyName": "S", "policyThreatLevel": 9,
+                 "waived": False, "waivedWithAutoWaiver": True},
+            ],
+        }])
+    )
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+    assert client.fetch_policy_report("demo", "rep-1")[0].is_waived is True
+
+
+def test_the_constraint_name_is_carried_into_the_summary():
+    assert _live_violation().constraint_summary == "EOL"
+
+
+def test_a_quality_eol_violation_below_the_threshold_is_not_actioned():
+    # policyThreatLevel 5 < 8: real payload, real policy, correctly left alone.
+    from nexus_autofix.iq.filter import filter_findings
+    from nexus_autofix.cli import findings_from_policy_report
+
+    class _NoRemediation:
+        def fetch_remediation(self, internal_id, component_identifier, stage_id):
+            from nexus_autofix.iq.client import RemediationResponse
+
+            return RemediationResponse(version_changes=[])
+
+    findings = findings_from_policy_report(_NoRemediation(), "app-1", [_live_violation()], "build")
+    assert filter_findings(findings, suppressed_components=set()).ignore

@@ -102,8 +102,19 @@ def test_the_instructions_do_not_tell_you_to_use_the_blocked_flag(tmp_path, caps
     printed = capsys.readouterr().out
     assert "copilot" in printed
     assert "--allow-all-tools" not in printed
-    assert str(repo) in printed, "the cd target must be shown"
-    assert "do NOT commit" in printed
+    assert str(repo) in printed, "the worktree path must be shown"
+    assert "leave them uncommitted" in printed, "this tool owns the commit"
+
+
+def test_the_instructions_offer_more_than_the_copilot_cli(tmp_path, capsys):
+    # The org blocks the CLI's unattended mode, not editing files. Any agent — or a
+    # person — can do this step, because git is the only thing consulted afterwards.
+    _agent().run(prompt="p", worktree=_repo(tmp_path))
+
+    printed = capsys.readouterr().out
+    assert "VS Code" in printed
+    assert "By hand" in printed
+    assert "no MCP server" in printed, "MCP policy blocks must not look like a blocker here"
 
 
 def test_a_worktree_path_with_spaces_is_quoted_in_the_cd_instruction(tmp_path, capsys):

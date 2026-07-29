@@ -90,24 +90,33 @@ def _instructions(worktree: Path, prompt_path: Path) -> str:
   AGENT STEP — over to you
 {'=' * 78}
 
-  1. Open a second terminal and go to the prepared worktree:
+  The prepared worktree is at:
 
-       cd {quoted}
+      {quoted}
 
-  2. Start the agent there:
+  Use whichever of these suits you. Only what git sees matters, so it makes no
+  difference which one made the edits:
 
-       copilot
+    * Copilot CLI      cd {quoted}
+                       copilot
+                       then paste PROMPT.md
 
-  3. Paste the contents of:
+    * VS Code          code {quoted}
+                       open Copilot Chat in agent mode, attach or paste PROMPT.md
 
-       {prompt_path}
+    * By hand          edit the manifest yourself
 
-     (also printed in full in this run's log)
+  The prompt is at:
 
-  4. Let it make the changes, then exit the agent. Leave the files as they are —
-     do NOT commit. This tool commits, verifies and pushes.
+      {prompt_path}
 
-  You can also just make the edits yourself. Only what git sees matters.
+  (also printed in full in this run's log, since the file is removed afterwards)
+
+  The prompt is plain text — no MCP server or tool integration is needed, so an
+  org policy blocking third-party MCP servers does not affect this step.
+
+  When the changes are made, leave them uncommitted and come back here. This tool
+  does the committing, building, testing, rescanning and PR.
 
 {'=' * 78}
 """

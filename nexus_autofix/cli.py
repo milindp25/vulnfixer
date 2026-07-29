@@ -447,6 +447,7 @@ def run_command(
     gate: str | None,
     dry_run: bool,
     mock_agent: bool,
+    interactive_agent: bool,
     verbose: bool,
 ):
     """

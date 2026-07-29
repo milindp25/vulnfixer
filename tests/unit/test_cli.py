@@ -213,3 +213,86 @@ def test_each_remediation_post_is_logged_with_its_component_and_body(caplog):
     assert '{"componentIdentifier": {"format": "npm"' in caplog.text
     assert "eol-thing" not in caplog.text, "skipped components must not appear as lookups"
     assert "2 POST(s) sent, 1 skipped" in caplog.text
+
+
+# --------------------------------------------------------------------------------------
+# The CLI layer itself. A --flag whose name is not in the command function's signature
+# raises TypeError only when the command actually runs, and nothing in the suite ran it —
+# so `nexusfix run --interactive-agent` shipped broken with 297 tests green.
+# --------------------------------------------------------------------------------------
+
+
+def test_every_declared_option_is_accepted_by_its_command_function():
+    """Introspective, so it covers flags added later — not just the one that broke."""
+    import inspect
+
+    from click import Command
+
+    from nexus_autofix import cli as cli_mod
+
+    checked = 0
+    for name in dir(cli_mod):
+        command = getattr(cli_mod, name)
+        if not isinstance(command, Command) or command.callback is None:
+            continue
+        accepted = set(inspect.signature(command.callback).parameters)
+        declared = {p.name for p in command.params}
+        missing = declared - accepted
+        assert not missing, (
+            f"{command.name}: option(s) {sorted(missing)} are declared with @click.option "
+            f"but absent from {command.callback.__name__}()'s signature — click passes them "
+            "as keyword arguments, so invoking the command raises TypeError"
+        )
+        checked += 1
+    assert checked, "no click commands were found to check"
+
+
+def test_run_forwards_the_interactive_agent_flag_to_perform_run(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    from click.testing import CliRunner
+
+    from nexus_autofix import cli as cli_mod
+    from nexus_autofix.iq.models import RunOutcome
+
+    (tmp_path / "config.yml").write_text(
+        "repos:\n  demo: https://example.com/o/demo.git\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    for var in ("IQ_URL", "IQ_USERNAME", "IQ_PASSWORD", "GITHUB_TOKEN"):
+        monkeypatch.setenv(f"NEXUSFIX_{var}", "x")
+
+    fake = MagicMock(return_value=cli_mod.RunResult(run_id="r1", outcome=RunOutcome.CLEAN))
+    with patch.object(cli_mod, "perform_run", fake):
+        result = CliRunner().invoke(
+            cli_mod.run_command,
+            ["--app-id", "demo", "--branch", "main", "--interactive-agent"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert fake.call_args.kwargs["interactive_agent"] is True
+
+
+def test_interactive_agent_defaults_to_off(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    from click.testing import CliRunner
+
+    from nexus_autofix import cli as cli_mod
+    from nexus_autofix.iq.models import RunOutcome
+
+    (tmp_path / "config.yml").write_text(
+        "repos:\n  demo: https://example.com/o/demo.git\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    for var in ("IQ_URL", "IQ_USERNAME", "IQ_PASSWORD", "GITHUB_TOKEN"):
+        monkeypatch.setenv(f"NEXUSFIX_{var}", "x")
+
+    fake = MagicMock(return_value=cli_mod.RunResult(run_id="r1", outcome=RunOutcome.CLEAN))
+    with patch.object(cli_mod, "perform_run", fake):
+        result = CliRunner().invoke(
+            cli_mod.run_command, ["--app-id", "demo", "--branch", "main"]
+        )
+
+    assert result.exit_code == 0, result.output
+    assert fake.call_args.kwargs["interactive_agent"] is False

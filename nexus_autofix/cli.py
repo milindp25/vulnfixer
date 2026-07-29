@@ -634,6 +634,10 @@ def perform_discovery(
         "target_purls": [f.package_url for f in findings if f.is_actionable],
         "build_command": " ".join(commands_mod.BUILD_COMMANDS[strategy.ecosystem](worktree.path)),
         "test_command": " ".join(commands_mod.TEST_COMMANDS[strategy.ecosystem](worktree.path)),
+        # `check` and `publish` read config.yml and .env from the CWD, so they only work
+        # from here. Recorded because whoever runs them — typically an agent sitting in the
+        # run directory — is not standing where `discover` was run.
+        "run_commands_from": str(Path.cwd().resolve()),
         # The findings go in run.json, not just on stdout. Whoever runs `discover` is often
         # not who does the editing: you run it, then hand a run_id to an agent in an editor
         # that never saw the stdout. Without them here its only options are to re-run
@@ -720,12 +724,17 @@ def _echo_next_steps(payload: dict) -> None:
         "       Read RUNBOOK.md and follow it.",
         f"       The run_id is {run_id}",
         "",
-        "  3. Or do the rest yourself — edit wt/ by hand, then:",
+        "  3. Or do the rest yourself — edit wt/ by hand, then run these",
+        f"     FROM {payload.get('run_commands_from', 'the directory holding config.yml')}",
+        "     (they read config.yml and .env from the current directory, so they will not",
+        "      work from the run directory or from wt/):",
         "",
         f"       nexusfix check --run-id {run_id}",
         f"       nexusfix publish --run-id {run_id}",
         "",
-        "  Do not commit in wt/ — `nexusfix publish` does that, after verifying.",
+        "  Edit files in wt/ but leave them uncommitted — `nexusfix publish` commits, after",
+        "  the build, the tests and the diff check have passed. Committing early is not fatal",
+        "  (it is verified from the run's base commit either way), it just skips nothing.",
         "",
         "=" * 78,
         "",
@@ -762,17 +771,35 @@ def discover_command(app_id: str | None, branch: str | None, verbose: bool):
     _echo_next_steps(payload)
 
 
+
+def _config_for_run(state: dict) -> ProjectConfig:
+    """Load config.yml, or explain where the command has to be run from.
+
+    Relative path, so this depends on the CWD. Without the check the failure is a bare
+    "no such file" from somewhere inside yaml parsing, which does not tell the reader that
+    they are simply standing in the wrong directory.
+    """
+    expected = state.get("run_commands_from")
+    if not Path("config.yml").is_file():
+        raise click.ClickException(
+            "config.yml is not in the current directory, and it is read from there.\n"
+            + (f"  Run this from: {expected}" if expected else
+               "  Run this from the directory holding config.yml and .env.")
+        )
+    return load_project_config(Path("config.yml"))
+
+
 @main.command("check")
 @click.option("--run-id", required=True, help="The run_id printed by `nexusfix discover`.")
 @click.option("-v", "--verbose", is_flag=True, default=False)
 def check_command(run_id: str, verbose: bool):
     """Classify the diff, then build and test the worktree. Records the verdict."""
     secrets = load_secrets()
-    config = load_project_config(Path("config.yml"))
     try:
         state = agent_api.load_run_state(secrets.workspace_root, run_id)
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
+    config = _config_for_run(state)
 
     run_dir = Path(state["run_dir"])
     configure_logging(run_dir / "nexusfix.log", verbose=verbose)
@@ -804,11 +831,11 @@ def publish_command(run_id: str, dry_run: bool, verbose: bool):
     build and a real diff classification.
     """
     secrets = load_secrets()
-    config = load_project_config(Path("config.yml"))
     try:
         state = agent_api.load_run_state(secrets.workspace_root, run_id)
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
+    config = _config_for_run(state)
 
     run_dir = Path(state["run_dir"])
     configure_logging(run_dir / "nexusfix.log", verbose=verbose)

@@ -88,12 +88,17 @@ or Maven equivalent) inside the worktree.
 - hand-edit a lockfile — regenerate it with the package manager
 - use `--legacy-peer-deps`, `--force`, `resolutionStrategy.force`, `npm audit fix`,
   version ranges, exclusions, or a downgrade
-- commit anything — committing is done for you in step 4
+- commit anything — `nexusfix publish` commits in step 4, after the build, the tests
+  and the diff check have passed
 
 These are checked automatically in step 3. A diff that does any of them is refused, and
 re-running will not change that.
 
 ## Step 3 — Verify
+
+**Run this from the directory in `run_commands_from` (see `run.json`)** — not from the run
+directory and not from `wt/`. `nexusfix` reads `config.yml` and `.env` from the current
+directory, so it only works from there.
 
 ```
 nexusfix check --run-id <run_id from step 1>
@@ -115,6 +120,8 @@ Repeat step 2 and step 3 until `ok` is true. If you cannot get there after a few
 attempts, stop and report what failed — do not force it through.
 
 ## Step 4 — Publish
+
+Again from `run_commands_from`, not from the run directory or `wt/`.
 
 ```
 nexusfix publish --run-id <run_id>

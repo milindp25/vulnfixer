@@ -1,3 +1,5 @@
+import pytest
+
 from nexus_autofix.cli import (
     findings_from_policy_report,
     purl_to_component_identifier,
@@ -343,7 +345,7 @@ def test_the_summary_shows_the_version_change_and_the_commands(capsys):
     assert "Read RUNBOOK.md and follow it." in err
     assert "nexusfix check --run-id run-123" in err
     assert "nexusfix publish --run-id run-123" in err
-    assert "Do not commit" in err
+    assert "leave them uncommitted" in err
 
 
 def test_a_transitive_finding_is_flagged_as_such(capsys):
@@ -386,3 +388,38 @@ def test_with_nothing_fixable_it_does_not_send_you_to_an_editor(capsys):
     assert "NEXT STEPS" not in err
     assert "Read RUNBOOK.md" not in err
     assert "nexusfix.log" in err, "point at where the reasons are recorded"
+
+
+def test_the_next_steps_say_where_to_run_check_and_publish(capsys):
+    # config.yml and .env are read from the CWD, so running these from the run directory —
+    # which is exactly where the agent and the reader are — fails. The location has to be
+    # on screen next to the commands.
+    from nexus_autofix import cli as cli_mod
+
+    cli_mod._echo_next_steps(_discover_payload(run_commands_from="/home/me/vulnfixer"))
+
+    err = capsys.readouterr().err
+    assert "FROM /home/me/vulnfixer" in err
+    assert "will not" in err and "work from the run directory" in err
+
+
+def test_a_missing_config_names_the_directory_to_run_from(tmp_path, monkeypatch):
+    # Otherwise the failure is a bare "no such file" from inside yaml parsing, which does
+    # not tell the reader they are simply standing in the wrong place.
+    import click
+
+    from nexus_autofix import cli as cli_mod
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(click.ClickException, match=r"Run this from: /home/me/vulnfixer"):
+        cli_mod._config_for_run({"run_commands_from": "/home/me/vulnfixer"})
+
+
+def test_a_missing_config_without_a_recorded_directory_still_explains(tmp_path, monkeypatch):
+    import click
+
+    from nexus_autofix import cli as cli_mod
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(click.ClickException, match="holding config.yml"):
+        cli_mod._config_for_run({})

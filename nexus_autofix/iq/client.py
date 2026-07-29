@@ -205,7 +205,7 @@ def _clean_component_name(component: dict) -> str:
     and the version baked in — so it can never match a plain name in the suppression
     list, and reads badly in a branch or PR title. The coordinates carry the real name.
     """
-    coordinates = component.get("componentIdentifier", {}).get("coordinates", {})
+    coordinates = (component.get("componentIdentifier") or {}).get("coordinates") or {}
     if isinstance(coordinates, dict):
         group_id = coordinates.get("groupId")
         artifact_id = coordinates.get("artifactId")
@@ -481,11 +481,31 @@ class HTTPIQClient:
             headers={"Accept": "application/json"},
         )
         components = _components_from_policy_report(resp.json())
-        violations = [
-            worst
-            for component in components
-            if (worst := _worst_violation_for_component(component)) is not None
-        ]
+        # Per component, so one oddly-shaped entry among hundreds cannot end the run. A
+        # single unexpected null used to raise out of here as a bare
+        # "AttributeError: 'NoneType' object has no attribute 'get'" with no indication of
+        # WHICH component caused it, out of an eighty-plus component report.
+        violations = []
+        unparsable = []
+        for component in components:
+            try:
+                worst = _worst_violation_for_component(component)
+            except Exception as exc:  # noqa: BLE001 - see above
+                unparsable.append(component.get("packageUrl") or component.get("displayName") or "?")
+                log.error(
+                    "could not parse one component from the policy report — skipping it and "
+                    "continuing.\n  %s: %s\n  component: %s",
+                    type(exc).__name__, exc, _truncate(component, 1200),
+                )
+                continue
+            if worst is not None:
+                violations.append(worst)
+        if unparsable:
+            log.warning(
+                "%d component(s) in the policy report could not be parsed and were skipped: "
+                "%s. They are NOT covered by this run — the full JSON for each is at ERROR "
+                "above.", len(unparsable), unparsable,
+            )
         # DEBUG, not INFO. This is EVERY component carrying any violation at any threat
         # level — the whole IQ report page, most of it far below the bar for an automated
         # fix. Putting it at INFO made the run announce a big number it had no intention
@@ -559,10 +579,10 @@ class HTTPIQClient:
             data = vc.get("data") if isinstance(vc.get("data"), dict) else {}
             component = data.get("component") if isinstance(data.get("component"), dict) else {}
             version = (
-                component.get("componentIdentifier", {}).get("coordinates", {}).get("version")
+                ((component.get("componentIdentifier") or {}).get("coordinates") or {}).get("version")
                 # Fallbacks for shapes seen in no live response, kept only so a variant
                 # degrades to a warning below rather than a silent empty version.
-                or data.get("componentIdentifier", {}).get("coordinates", {}).get("version")
+                or ((data.get("componentIdentifier") or {}).get("coordinates") or {}).get("version")
                 or data.get("version")
                 or ""
             )
@@ -575,11 +595,11 @@ class HTTPIQClient:
         # 549 bytes) and gating means only a handful are fetched per run. Printing what
         # IQ said next to what was parsed out of it makes a mismatch self-evident instead
         # of something to be inferred from a wrong version downstream.
-        requested_version = (component_identifier or {}).get("coordinates", {}).get("version")
+        requested_version = ((component_identifier or {}).get("coordinates") or {}).get("version")
         log.info(
             "remediation for %s@%s -> parsed %s\n  raw response: %s",
-            (component_identifier or {}).get("coordinates", {}).get("packageId")
-            or (component_identifier or {}).get("coordinates", {}).get("artifactId")
+            ((component_identifier or {}).get("coordinates") or {}).get("packageId")
+            or ((component_identifier or {}).get("coordinates") or {}).get("artifactId")
             or "component",
             requested_version,
             [(vc.change_type, vc.version) for vc in version_changes] or "nothing",
@@ -652,8 +672,8 @@ class FakeIQClient:
 
     def fetch_remediation(self, internal_id: str, component_identifier: dict, stage_id: str) -> RemediationResponse:
         name = (
-            component_identifier.get("coordinates", {}).get("artifactId")
-            or component_identifier.get("coordinates", {}).get("packageId")
+            (component_identifier.get("coordinates") or {}).get("artifactId")
+            or (component_identifier.get("coordinates") or {}).get("packageId")
             or component_identifier.get("name", "")
         )
         return self.remediations.get(name, RemediationResponse(version_changes=[]))

@@ -725,3 +725,78 @@ def test_a_target_echoing_the_requested_version_is_called_out(caplog):
     assert result.version_changes[0].version == "1.0"
     assert "the SAME version that was requested" in caplog.text
     assert "reading the component it was asked about" in caplog.text
+
+
+# --- nulls in the payload ---------------------------------------------------
+# `d.get(k, {})` returns None when k is PRESENT with a null value — the default only applies
+# when the key is absent. Live responses do contain nulls ("hash": null), so every chained
+# .get of that shape was an AttributeError waiting for the right component.
+
+
+def _one_component(component):
+    session = MagicMock()
+    session.get.return_value = _status_response(_live_report([component]))
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+    return client.fetch_policy_report("demo", "rep-1")
+
+
+def test_a_null_component_identifier_does_not_crash_the_report():
+    violations = _one_component({
+        "packageUrl": "pkg:npm/x@1.0",
+        "componentIdentifier": None,          # <- the crash
+        "displayName": "x : 1.0",
+        "violations": [{"policyName": "S", "policyThreatLevel": 9}],
+    })
+    assert len(violations) == 1
+    assert violations[0].threat_level == 9
+
+
+def test_null_coordinates_do_not_crash_the_report():
+    violations = _one_component({
+        "packageUrl": "pkg:npm/x@1.0",
+        "componentIdentifier": {"format": "npm", "coordinates": None},
+        "displayName": "x : 1.0",
+        "violations": [{"policyName": "S", "policyThreatLevel": 9}],
+    })
+    assert len(violations) == 1
+    assert violations[0].component == "x", "falls back to displayName"
+
+
+def test_null_dependency_data_does_not_crash_the_report():
+    violations = _one_component({
+        "packageUrl": "pkg:npm/x@1.0", "displayName": "x : 1.0",
+        "dependencyData": None,
+        "violations": [{"policyName": "S", "policyThreatLevel": 9}],
+    })
+    assert violations[0].is_direct is True
+
+
+def test_one_unparsable_component_does_not_sink_the_whole_report(caplog):
+    # An 80+ component report should not be lost to one odd entry, and the log must name
+    # which one it was — the bare AttributeError did not.
+    session = MagicMock()
+    session.get.return_value = _status_response(_live_report([
+        "this is a string, not a component",
+        {"packageUrl": "pkg:npm/good@1.0", "displayName": "good : 1.0",
+         "violations": [{"policyName": "S", "policyThreatLevel": 9}]},
+    ]))
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    with caplog.at_level(logging.WARNING):
+        violations = client.fetch_policy_report("demo", "rep-1")
+
+    assert [v.component for v in violations] == ["good"], "the good one still comes through"
+
+
+def test_a_null_remediation_component_does_not_crash():
+    result = _remediation_response({"remediation": {"versionChanges": [
+        {"type": "next-no-violations", "data": {"component": None}},
+    ]}})
+    assert result.version_changes[0].version == ""
+
+
+def test_a_report_with_no_components_at_all_is_not_an_error():
+    session = MagicMock()
+    session.get.return_value = _status_response(_live_report([]))
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+    assert client.fetch_policy_report("demo", "rep-1") == []

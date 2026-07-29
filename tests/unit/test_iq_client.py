@@ -271,3 +271,117 @@ def test_policy_report_url_is_built_from_the_real_report_id():
         session.get.call_args.args[0]
         == "https://iq.example.com/api/v2/applications/test-demo/reports/rep-42/policy"
     )
+
+
+# --- /policy response parsing (live shape) ----------------------------------
+
+
+def _policy_body(components):
+    return {"reportTime": 1, "reportTitle": "demo", "components": components}
+
+
+def test_policy_report_is_an_object_with_components_not_a_bare_list():
+    # Iterating the object directly yielded string keys ->
+    # AttributeError: 'str' object has no attribute 'get'.
+    session = MagicMock()
+    session.get.return_value = _status_response(
+        _policy_body([
+            {
+                "packageUrl": "pkg:maven/org.apache.commons/commons-text@1.9",
+                "displayName": "commons-text 1.9",
+                "violations": [
+                    {"policyName": "Security-High", "policyId": "p1", "policyThreatLevel": 8,
+                     "policyThreatCategory": "SECURITY", "waived": False},
+                ],
+            }
+        ])
+    )
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    violations = client.fetch_policy_report("demo", "rep-1")
+
+    assert len(violations) == 1
+    assert violations[0].component == "commons-text 1.9"
+    assert violations[0].threat_level == 8
+
+
+def test_highest_policy_threat_level_wins_for_a_component():
+    session = MagicMock()
+    session.get.return_value = _status_response(
+        _policy_body([
+            {
+                "packageUrl": "pkg:maven/x/y@1.0",
+                "displayName": "y",
+                "violations": [
+                    {"policyName": "Quality", "policyThreatLevel": 3, "waived": False},
+                    {"policyName": "Security-Critical", "policyThreatLevel": 9, "waived": False},
+                    {"policyName": "License", "policyThreatLevel": 6, "waived": False},
+                ],
+            }
+        ])
+    )
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    violations = client.fetch_policy_report("demo", "rep-1")
+
+    assert len(violations) == 1, "one entry per component, not per violation"
+    assert violations[0].threat_level == 9
+    assert violations[0].policy_name == "Security-Critical"
+
+
+def test_waived_violations_are_skipped_when_choosing_the_worst():
+    session = MagicMock()
+    session.get.return_value = _status_response(
+        _policy_body([
+            {
+                "packageUrl": "pkg:maven/x/y@1.0", "displayName": "y",
+                "violations": [
+                    {"policyName": "Security-Critical", "policyThreatLevel": 10, "waived": True},
+                    {"policyName": "Security-High", "policyThreatLevel": 8, "waived": False},
+                ],
+            }
+        ])
+    )
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    violation = client.fetch_policy_report("demo", "rep-1")[0]
+    assert violation.threat_level == 8
+    assert violation.is_waived is False
+
+
+def test_a_component_whose_violations_are_all_waived_is_reported_waived():
+    session = MagicMock()
+    session.get.return_value = _status_response(
+        _policy_body([
+            {
+                "packageUrl": "pkg:maven/x/y@1.0", "displayName": "y",
+                "violations": [{"policyName": "S", "policyThreatLevel": 9, "waived": True}],
+            }
+        ])
+    )
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+    assert client.fetch_policy_report("demo", "rep-1")[0].is_waived is True
+
+
+def test_components_without_violations_are_dropped():
+    session = MagicMock()
+    session.get.return_value = _status_response(
+        _policy_body([
+            {"packageUrl": "pkg:maven/clean/clean@1.0", "displayName": "clean", "violations": []},
+            {"packageUrl": "pkg:maven/x/y@1.0", "displayName": "y",
+             "violations": [{"policyName": "S", "policyThreatLevel": 9}]},
+        ])
+    )
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+    violations = client.fetch_policy_report("demo", "rep-1")
+    assert [v.component for v in violations] == ["y"]
+
+
+def test_a_bare_list_response_is_still_accepted():
+    session = MagicMock()
+    session.get.return_value = _status_response(
+        [{"packageUrl": "pkg:maven/x/y@1.0", "displayName": "y",
+          "violations": [{"policyName": "S", "policyThreatLevel": 9}]}]
+    )
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+    assert client.fetch_policy_report("demo", "rep-1")[0].threat_level == 9

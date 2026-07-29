@@ -213,6 +213,7 @@ def perform_run(
         java_toolchains=config.java_toolchains,
         node_toolchains=config.node_toolchains,
         subprocess_timeout_seconds=config.subprocess_timeout_seconds,
+        min_threat_level=config.min_threat_level,
     )
 
     def rescan_fn(rc: RunConfig, wt: Path) -> str:

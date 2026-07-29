@@ -10,7 +10,7 @@ from pathlib import Path
 from nexus_autofix.agent.base import AgentRunner, changed_files_from_git
 from nexus_autofix.agent.prompt import RetryContext, build_prompt
 from nexus_autofix.iq.client import IQClient
-from nexus_autofix.iq.filter import filter_findings
+from nexus_autofix.iq.filter import DEFAULT_MIN_THREAT_LEVEL, filter_findings
 from nexus_autofix.iq.models import Finding, RepoProfile, RunOutcome
 from nexus_autofix.publish import branch as branch_mod
 from nexus_autofix.publish.gate import GateMode
@@ -34,6 +34,7 @@ class RunConfig:
     java_toolchains: dict[str, str]
     node_toolchains: dict[str, str]
     subprocess_timeout_seconds: int
+    min_threat_level: int = DEFAULT_MIN_THREAT_LEVEL
 
     def __post_init__(self) -> None:
         # An unvalidated gate string is a fail-open: a typo like "pre_push" or
@@ -129,7 +130,11 @@ class Orchestrator:
         pushed = False
         pr_opened = False
         try:
-            filtered = filter_findings(findings, suppressed_components=set(suppressed_components))
+            filtered = filter_findings(
+                findings,
+                suppressed_components=set(suppressed_components),
+                min_threat_level=run_config.min_threat_level,
+            )
             for f in filtered.escalate:
                 self._state.record_finding(run_id, f.component, f.package_url, f.current_version, f.target_version, "escalate")
             for f in filtered.ignore:

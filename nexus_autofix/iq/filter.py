@@ -33,6 +33,11 @@ def classify_bump(current: str, target: str) -> BumpSize:
     return BumpSize.PATCH
 
 
+#: IQ threat levels run 0-10. Only levels ABOVE this are worth an automated fix — 8+ is
+#: what IQ labels Critical/Severe. Overridable via config.yml's `min_threat_level`.
+DEFAULT_MIN_THREAT_LEVEL = 8
+
+
 @dataclass(frozen=True)
 class FilterResult:
     actionable: list[Finding]
@@ -40,14 +45,24 @@ class FilterResult:
     ignore: list[Finding]
 
 
-def filter_findings(findings: list[Finding], suppressed_components: set[str]) -> FilterResult:
+def filter_findings(
+    findings: list[Finding],
+    suppressed_components: set[str],
+    min_threat_level: int = DEFAULT_MIN_THREAT_LEVEL,
+) -> FilterResult:
+    """Split findings into what the agent may fix, what a human must see, and noise.
+
+    The gate is the component's threat level, NOT `policy_action`: IQ's
+    `policyThreatCategory` is a category (SECURITY / LICENSE / QUALITY), never an
+    action like "Fail", so gating on it would drop everything. Each finding already
+    carries the HIGHEST threat level among that component's violations.
+    """
     actionable: list[Finding] = []
     escalate: list[Finding] = []
     ignore: list[Finding] = []
 
     for finding in findings:
-        is_failing = finding.policy_action.lower() in {"fail", "failure"}
-        if not is_failing:
+        if finding.threat_level < min_threat_level:
             ignore.append(finding)
             continue
         if finding.is_waived:

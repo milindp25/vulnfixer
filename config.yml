@@ -4,6 +4,10 @@ poll_timeout_seconds: 900
 default_stage_id: build
 default_gate: pre-pr
 
+# IQ threat levels run 0-10. Only components whose HIGHEST violation is at or above
+# this are fixed automatically; anything lower is reported but left alone.
+min_threat_level: 8
+
 # Optional. Leave empty to use whatever is already active on the machine:
 # JAVA_HOME (or `java` on PATH) and `node` on PATH. The version found is checked
 # against what the repo declares in .trident/build.yaml and a mismatch is warned

@@ -134,6 +134,87 @@ def _report_id_from_url(url: object) -> str:
     return parts[-1] if parts else ""
 
 
+def _components_from_policy_report(body: object) -> list[dict]:
+    """The component list out of a /policy response.
+
+    VERIFIED AGAINST A LIVE INSTANCE: the response is an OBJECT with a ``components``
+    array, not a bare array. Iterating the object directly yields its string keys, which
+    is where ``AttributeError: 'str' object has no attribute 'get'`` came from. A bare
+    list is still accepted in case another IQ version returns one.
+    """
+    if isinstance(body, dict):
+        for key in ("components", "componentPolicyViolations", "results"):
+            value = body.get(key)
+            if isinstance(value, list):
+                return [entry for entry in value if isinstance(entry, dict)]
+        return []
+    if isinstance(body, list):
+        return [entry for entry in body if isinstance(entry, dict)]
+    return []
+
+
+def _threat_level_of(violation: dict) -> int:
+    """VERIFIED AGAINST A LIVE INSTANCE: the field is ``policyThreatLevel``."""
+    for field in ("policyThreatLevel", "threatLevel"):
+        value = violation.get(field)
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+    return 0
+
+
+def _worst_violation_for_component(component: dict) -> PolicyViolation | None:
+    """Collapse a component's violations to the single highest-threat one.
+
+    A component routinely carries several violations at different threat levels. The
+    highest is what decides whether the component is worth acting on, so that is the one
+    represented. Waived violations are ignored when picking the worst — a waiver is a
+    decision already made — and a component whose violations are *all* waived is
+    reported as waived so the filter can drop it.
+    """
+    raw_violations = component.get("violations")
+    if not isinstance(raw_violations, list):
+        return None
+    violations = [v for v in raw_violations if isinstance(v, dict)]
+    if not violations:
+        return None
+
+    def is_waived(violation: dict) -> bool:
+        return bool(violation.get("waived") or violation.get("grandfathered"))
+
+    considered = [v for v in violations if not is_waived(v)]
+    all_waived = not considered
+    if all_waived:
+        considered = violations
+
+    worst = max(considered, key=_threat_level_of)
+    package_url = component.get("packageUrl") or ""
+    constraints = worst.get("constraints")
+    constraint_summary = (
+        "; ".join(
+            c.get("constraintName", "")
+            for c in constraints
+            if isinstance(c, dict)
+        )
+        if isinstance(constraints, list)
+        else ""
+    )
+    return PolicyViolation(
+        package_url=package_url,
+        component=component.get("displayName") or package_url,
+        policy_name=worst.get("policyName", ""),
+        policy_id=worst.get("policyId", ""),
+        threat_level=_threat_level_of(worst),
+        constraint_summary=constraint_summary,
+        is_waived=all_waived,
+        # policyThreatCategory is a CATEGORY (SECURITY / LICENSE / QUALITY), never an
+        # action like "Fail" — kept for the PR body, but the actionable/ignore decision
+        # is made on threat level, not on this.
+        action=worst.get("policyThreatCategory", ""),
+    )
+
+
 def _extract_error_message(body: dict) -> str:
     for field in _ERROR_MESSAGE_FIELDS:
         value = body.get(field)
@@ -308,29 +389,25 @@ class HTTPIQClient:
             f"{self._base_url}/api/v2/applications/{public_id}/reports/{report_id}/policy",
             headers={"Accept": "application/json"},
         )
-        violations = []
-        for item in resp.json():
-            for violation in item.get("violations", []):
-                violations.append(
-                    PolicyViolation(
-                        package_url=item.get("packageUrl", ""),
-                        component=item.get("displayName", item.get("packageUrl", "")),
-                        policy_name=violation.get("policyName", ""),
-                        policy_id=violation.get("policyId", ""),
-                        threat_level=violation.get("threatLevel", 0),
-                        constraint_summary="; ".join(
-                            c.get("constraintName", "") for c in violation.get("constraints", [])
-                        ),
-                        is_waived=violation.get("waived", False),
-                        action=violation.get("policyThreatCategory", violation.get("action", "")),
-                    )
-                )
-        log.info("IQ policy report %s: %d violation(s)", report_id, len(violations))
-        if not violations:
+        components = _components_from_policy_report(resp.json())
+        violations = [
+            worst
+            for component in components
+            if (worst := _worst_violation_for_component(component)) is not None
+        ]
+        log.info(
+            "IQ policy report %s: %d component(s) with violations", report_id, len(violations)
+        )
+        for violation in violations:
             log.debug(
-                "No violations parsed from the policy report. If the IQ UI shows findings for "
-                "this report, the JSON field names below may differ from what this client "
-                "expects (packageUrl / displayName / violations[]) — check the DEBUG body above."
+                "  %s threat=%s policy=%s waived=%s",
+                violation.component, violation.threat_level, violation.policy_name, violation.is_waived,
+            )
+        if components and not violations:
+            log.debug(
+                "Components were present but none carried a parsable violation — compare the "
+                "DEBUG response body above against the field names this client reads "
+                "(violations[].policyThreatLevel / policyName / waived)."
             )
         return violations
 

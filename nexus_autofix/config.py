@@ -7,6 +7,8 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
+from nexus_autofix.iq.filter import DEFAULT_MIN_THREAT_LEVEL
+
 
 @dataclass(frozen=True)
 class Secrets:
@@ -36,6 +38,7 @@ class ProjectConfig:
     poll_timeout_seconds: int
     default_stage_id: str
     default_gate: str
+    min_threat_level: int
     java_toolchains: dict[str, str]
     node_toolchains: dict[str, str]
     repos: dict[str, str]
@@ -89,6 +92,7 @@ def load_project_config(path: Path) -> ProjectConfig:
         poll_timeout_seconds=data.get("poll_timeout_seconds", 900),
         default_stage_id=data.get("default_stage_id", "build"),
         default_gate=data.get("default_gate", "pre-pr"),
+        min_threat_level=int(data.get("min_threat_level", DEFAULT_MIN_THREAT_LEVEL)),
         java_toolchains={str(k): v for k, v in (toolchains.get("java") or {}).items()},
         node_toolchains={str(k): v for k, v in (toolchains.get("node") or {}).items()},
         repos=data.get("repos") or {},

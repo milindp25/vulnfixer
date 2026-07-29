@@ -58,9 +58,30 @@ def test_no_target_version_is_escalated():
     assert len(result.escalate) == 1
 
 
-def test_non_failing_policy_action_is_ignored():
-    result = filter_findings([_finding(policy_action="Warn")], suppressed_components=set())
+def test_threat_level_below_the_threshold_is_ignored():
+    result = filter_findings([_finding(threat_level=7)], suppressed_components=set())
     assert len(result.ignore) == 1
+    assert not result.actionable
+
+
+def test_threat_level_at_the_threshold_is_actionable():
+    result = filter_findings([_finding(threat_level=8)], suppressed_components=set())
+    assert len(result.actionable) == 1
+
+
+def test_threshold_is_configurable():
+    findings = [_finding(threat_level=5)]
+    assert len(filter_findings(findings, set(), min_threat_level=5).actionable) == 1
+    assert len(filter_findings(findings, set(), min_threat_level=6).ignore) == 1
+
+
+def test_policy_threat_category_does_not_gate_anything():
+    # policyThreatCategory is SECURITY / LICENSE / QUALITY — never "Fail". Gating on it
+    # would ignore every real finding, which is what happened before.
+    result = filter_findings(
+        [_finding(policy_action="SECURITY", threat_level=9)], suppressed_components=set()
+    )
+    assert len(result.actionable) == 1
 
 
 def test_suppressed_component_is_ignored():

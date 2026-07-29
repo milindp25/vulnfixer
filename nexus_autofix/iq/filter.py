@@ -33,12 +33,25 @@ def classify_bump(current: str, target: str) -> BumpSize:
     return BumpSize.PATCH
 
 
-def _version_tuple(version: str) -> tuple[int, int, int] | None:
-    """(major, minor, patch) for ordering comparisons, or None if unparseable."""
-    match = _SEMVER_RE.match(version or "")
+#: Every leading numeric component, however many there are. Deliberately NOT _SEMVER_RE,
+#: which stops at three: .NET and some Java artifacts publish four ("1.2.3.4"), and
+#: truncating made 1.2.3.4 and 1.2.3.9 compare equal — so a genuine upgrade was rejected
+#: as "not an upgrade" and escalated.
+_NUMERIC_PARTS_RE = re.compile(r"^v?(\d+(?:\.\d+)*)")
+
+
+def _version_tuple(version: str) -> tuple[int, ...] | None:
+    """Leading numeric components as a tuple, or None if there are none.
+
+    Comparison ignores any pre-release or build suffix, so "8.5.10-beta" and "8.5.10"
+    order equal and therefore do not count as an upgrade. That is the conservative
+    answer: a pre-release is not a remediation target worth handing to an agent
+    unattended, and equal ordering routes it to a human instead.
+    """
+    match = _NUMERIC_PARTS_RE.match(version or "")
     if not match:
         return None
-    return (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+    return tuple(int(part) for part in match.group(1).split("."))
 
 
 def is_a_real_upgrade(current: str, target: str) -> bool:
@@ -64,6 +77,11 @@ def is_a_real_upgrade(current: str, target: str) -> bool:
     current_parts, target_parts = _version_tuple(current), _version_tuple(target)
     if current_parts is None or target_parts is None:
         return True
+    # Pad to equal length so "1.9" and "1.9.0" compare equal rather than the shorter
+    # tuple sorting first, which would call 1.9.0 an upgrade over 1.9.
+    width = max(len(current_parts), len(target_parts))
+    current_parts += (0,) * (width - len(current_parts))
+    target_parts += (0,) * (width - len(target_parts))
     return target_parts > current_parts
 
 

@@ -169,3 +169,26 @@ def test_a_genuine_upgrade_is_still_actionable():
         [_finding(current_version="8.4.31", target_version="8.5.18")], suppressed_components=set()
     )
     assert len(result.actionable) == 1
+
+
+def test_four_component_versions_are_ordered_on_all_four():
+    # .NET and some Java artifacts publish 1.2.3.4. Truncating at three made 1.2.3.4 and
+    # 1.2.3.9 compare equal, so a genuine upgrade was rejected as a no-op and escalated.
+    assert is_a_real_upgrade("1.2.3.4", "1.2.3.9") is True
+    assert is_a_real_upgrade("1.2.3.9", "1.2.3.4") is False
+    assert is_a_real_upgrade("1.2.3.4", "1.2.3.4") is False
+
+
+def test_versions_of_differing_length_compare_by_value_not_by_length():
+    assert is_a_real_upgrade("1.9", "1.9.0") is False, "same version, written two ways"
+    assert is_a_real_upgrade("1.9.0", "1.9") is False
+    assert is_a_real_upgrade("1.9", "1.9.1") is True
+    assert is_a_real_upgrade("1.9.1", "1.9") is False
+
+
+def test_a_prerelease_suffix_does_not_count_as_an_upgrade_either_way():
+    # Ordering ignores the suffix, so these compare equal and go to a human. Shipping a
+    # pre-release as an unattended remediation is not something to do quietly.
+    assert is_a_real_upgrade("8.5.10-beta", "8.5.10") is False
+    assert is_a_real_upgrade("8.5.10", "8.5.10-beta") is False
+    assert is_a_real_upgrade("8.5.10-beta", "8.5.11") is True

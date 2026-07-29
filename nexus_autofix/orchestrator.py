@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from nexus_autofix.agent.base import AgentRunner, changed_files_from_git
+from nexus_autofix.agent.base import AgentRunner
 from nexus_autofix.agent.prompt import RetryContext, build_prompt
 from nexus_autofix.iq.client import IQClient
 from nexus_autofix.iq.filter import DEFAULT_MIN_THREAT_LEVEL, filter_findings
@@ -229,7 +229,13 @@ class Orchestrator:
                 )
                 log.info("=== attempt %d of %d: invoking agent ===", attempt, run_config.max_attempts)
                 self._agent.run(prompt, worktree, env)
-                changed = changed_files_from_git(worktree)
+                # Diff from the commit the worktree was created at, not from HEAD. With
+                # --interactive-agent a person is at the keyboard and may commit despite
+                # being told not to; against HEAD their work would diff to nothing and the
+                # run would report NO_CHANGES — "the agent did nothing" — with the changes
+                # sitting right there on the branch.
+                diff_result = diff_mod.classify_diff(worktree, commit_sha)
+                changed = diff_result.changed_files
                 log.info("agent changed %d file(s): %s", len(changed), changed or "(none)")
 
                 if not changed:
@@ -244,7 +250,6 @@ class Orchestrator:
                         attempted_but_unresolved=filtered.actionable, notes=["agent made no changes"],
                     )
 
-                diff_result = diff_mod.classify_diff(worktree)
                 log.info("diff classified as %s", diff_result.classification.value)
                 if diff_result.classification == diff_mod.DiffClass.SUSPICIOUS:
                     log.error("refusing to publish a suspicious diff: %s",

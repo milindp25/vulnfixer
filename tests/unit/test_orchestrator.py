@@ -95,6 +95,20 @@ def _init_repo(tmp_path: Path, strategy_yaml: str | None = None) -> Path:
     return repo
 
 
+def _head(repo: Path) -> str:
+    """The fixture repo's real HEAD.
+
+    The orchestrator diffs from the commit the worktree was created at, so the tests have
+    to pass a SHA that exists. A placeholder like "abc123" made `git diff` fail outright,
+    which is not something production can hit — commit_sha always comes from
+    resolve_branch_commit_sha.
+    """
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True,
+        encoding="utf-8", check=True,
+    ).stdout.strip()
+
+
 class FixingAgent:
     """Edits the manifest only -- yields a MANIFEST_ONLY diff."""
 
@@ -123,7 +137,7 @@ def _fail(*args, **kwargs):
 def test_no_actionable_findings_returns_clean(tmp_path):
     orchestrator = _orchestrator(StateStore(tmp_path / "state.db"))
     result = orchestrator.run(
-        run_config=_run_config(), worktree=tmp_path, commit_sha="abc123",
+        run_config=_run_config(), worktree=tmp_path, commit_sha="unused-no-diff-is-taken",
         findings=[], repo_name="demo", baseline_report_id="report-1",
     )
     assert result.outcome == RunOutcome.CLEAN
@@ -132,7 +146,7 @@ def test_no_actionable_findings_returns_clean(tmp_path):
 def test_missing_trident_file_escalates(tmp_path):
     orchestrator = _orchestrator(StateStore(tmp_path / "state.db"))
     result = orchestrator.run(
-        run_config=_run_config(), worktree=tmp_path, commit_sha="abc123",
+        run_config=_run_config(), worktree=tmp_path, commit_sha="unused-no-diff-is-taken",
         findings=[_finding()], repo_name="demo", baseline_report_id="report-1",
     )
     assert result.outcome == RunOutcome.ESCALATED
@@ -157,7 +171,7 @@ def test_unusable_toolchain_escalates_before_agent_runs(tmp_path):
     orchestrator = _orchestrator(StateStore(tmp_path / "state.db"), agent=CountingAgent())
     result = orchestrator.run(
         run_config=_run_config(java_toolchains={"17": str(tmp_path / "no-such-jdk")}),
-        worktree=tmp_path, commit_sha="abc123",
+        worktree=tmp_path, commit_sha="unused-no-diff-is-taken",
         findings=[_finding()], repo_name="demo", baseline_report_id="report-1",
     )
     assert result.outcome == RunOutcome.ESCALATED
@@ -178,7 +192,7 @@ def test_unhandled_exception_is_recorded_as_failed_build(tmp_path, monkeypatch):
     orchestrator = _orchestrator(store, agent=FixingAgent())
 
     result = orchestrator.run(
-        run_config=_run_config(), worktree=repo, commit_sha="abc123",
+        run_config=_run_config(), worktree=repo, commit_sha=_head(repo),
         findings=[_finding()], repo_name="demo", baseline_report_id="report-1",
     )
 
@@ -205,7 +219,7 @@ def test_exception_after_push_deletes_the_orphaned_remote_branch(tmp_path, monke
         rescan_fn=exploding_rescan,
     )
     result = orchestrator.run(
-        run_config=_run_config(), worktree=repo, commit_sha="abc123",
+        run_config=_run_config(), worktree=repo, commit_sha=_head(repo),
         findings=[_finding()], repo_name="demo", baseline_report_id="report-1",
     )
 
@@ -233,7 +247,7 @@ def test_cleanup_failure_does_not_mask_the_original_exception(tmp_path, monkeypa
         rescan_fn=exploding_rescan,
     )
     result = orchestrator.run(
-        run_config=_run_config(), worktree=repo, commit_sha="abc123",
+        run_config=_run_config(), worktree=repo, commit_sha=_head(repo),
         findings=[_finding()], repo_name="demo", baseline_report_id="report-1",
     )
 
@@ -252,7 +266,7 @@ def test_agent_exception_is_caught_too(tmp_path):
 
     orchestrator = _orchestrator(store, agent=ExplodingAgent())
     result = orchestrator.run(
-        run_config=_run_config(), worktree=repo, commit_sha="abc123",
+        run_config=_run_config(), worktree=repo, commit_sha=_head(repo),
         findings=[_finding()], repo_name="demo", baseline_report_id="report-1",
     )
     assert result.outcome == RunOutcome.FAILED_BUILD
@@ -288,7 +302,7 @@ def test_failed_rescan_records_outcome_even_when_branch_delete_raises(tmp_path, 
         delete_remote_branch_fn=exploding_delete,
     )
     result = orchestrator.run(
-        run_config=_run_config(), worktree=repo, commit_sha="abc123",
+        run_config=_run_config(), worktree=repo, commit_sha=_head(repo),
         findings=[_finding()], repo_name="demo", baseline_report_id="report-1",
     )
 
@@ -313,7 +327,7 @@ def test_rejected_records_outcome_even_when_branch_delete_raises(tmp_path, monke
         approve_fn=lambda summary: False,
     )
     result = orchestrator.run(
-        run_config=_run_config(gate="pre-pr"), worktree=repo, commit_sha="abc123",
+        run_config=_run_config(gate="pre-pr"), worktree=repo, commit_sha=_head(repo),
         findings=[_finding()], repo_name="demo", baseline_report_id="report-1",
     )
 
@@ -332,7 +346,7 @@ def test_failed_build_reports_both_not_attempted_and_attempted_findings(tmp_path
 
     orchestrator = _orchestrator(store, agent=FixingAgent())
     result = orchestrator.run(
-        run_config=_run_config(), worktree=repo, commit_sha="abc123",
+        run_config=_run_config(), worktree=repo, commit_sha=_head(repo),
         findings=[_finding(), _major_bump_finding()], repo_name="demo", baseline_report_id="report-1",
     )
 
@@ -358,7 +372,7 @@ def test_rejected_reports_both_not_attempted_and_attempted_findings(tmp_path, mo
         approve_fn=lambda summary: False,
     )
     result = orchestrator.run(
-        run_config=_run_config(gate="pre-pr"), worktree=repo, commit_sha="abc123",
+        run_config=_run_config(gate="pre-pr"), worktree=repo, commit_sha=_head(repo),
         findings=[_finding(), _major_bump_finding()], repo_name="demo", baseline_report_id="report-1",
     )
 
@@ -379,7 +393,7 @@ def test_fixed_reports_escalate_set_not_the_fixed_set(tmp_path, monkeypatch):
         push_fn=lambda worktree, branch: None,
     )
     result = orchestrator.run(
-        run_config=_run_config(), worktree=repo, commit_sha="abc123",
+        run_config=_run_config(), worktree=repo, commit_sha=_head(repo),
         findings=[_finding(), _major_bump_finding()], repo_name="demo", baseline_report_id="report-1",
     )
 
@@ -395,7 +409,7 @@ def test_no_changes_reports_attempted_findings(tmp_path):
     store = StateStore(tmp_path / "state.db")
     orchestrator = _orchestrator(store, agent=MockAgent(mode=MockMode.NO_CHANGES))
     result = orchestrator.run(
-        run_config=_run_config(), worktree=repo, commit_sha="abc123",
+        run_config=_run_config(), worktree=repo, commit_sha=_head(repo),
         findings=[_finding(), _major_bump_finding()], repo_name="demo", baseline_report_id="report-1",
     )
     assert result.outcome == RunOutcome.NO_CHANGES
@@ -448,7 +462,7 @@ def test_dependency_diagnostic_is_skipped_on_the_final_attempt(tmp_path, monkeyp
     monkeypatch.setattr(commands_mod, "run_command", recording_run)
     orchestrator = _orchestrator(store, agent=FixingAgent())
     result = orchestrator.run(
-        run_config=_run_config(max_attempts=2), worktree=repo, commit_sha="abc123",
+        run_config=_run_config(max_attempts=2), worktree=repo, commit_sha=_head(repo),
         findings=[_finding()], repo_name="demo", baseline_report_id="report-1",
     )
 
@@ -465,7 +479,7 @@ def test_suppressed_components_are_filtered_out(tmp_path):
     store = StateStore(tmp_path / "state.db")
     orchestrator = _orchestrator(store)
     result = orchestrator.run(
-        run_config=_run_config(), worktree=tmp_path, commit_sha="abc123",
+        run_config=_run_config(), worktree=tmp_path, commit_sha="unused-no-diff-is-taken",
         findings=[_finding()], repo_name="demo", baseline_report_id="report-1",
         suppressed_components={"x"},
     )
@@ -482,7 +496,7 @@ def test_suppressions_default_to_none_applied(tmp_path):
     store = StateStore(tmp_path / "state.db")
     orchestrator = _orchestrator(store)
     result = orchestrator.run(
-        run_config=_run_config(), worktree=tmp_path, commit_sha="abc123",
+        run_config=_run_config(), worktree=tmp_path, commit_sha="unused-no-diff-is-taken",
         findings=[_finding()], repo_name="demo", baseline_report_id="report-1",
     )
     assert result.outcome == RunOutcome.ESCALATED  # actionable, but no .trident strategy
@@ -501,7 +515,7 @@ def test_multiple_trident_strategies_escalate_before_the_agent_runs(tmp_path):
     orchestrator = _orchestrator(store, agent=agent)
 
     result = orchestrator.run(
-        run_config=_run_config(), worktree=repo, commit_sha="abc123",
+        run_config=_run_config(), worktree=repo, commit_sha=_head(repo),
         findings=[_finding()], repo_name="demo", baseline_report_id="report-1",
     )
 

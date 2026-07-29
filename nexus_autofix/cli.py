@@ -939,19 +939,47 @@ def publish_command(run_id: str, dry_run: bool, verbose: bool):
         raise SystemExit(1)
 
     owner, repo = _owner_repo_from_url(state["repo_url"])
-    pull_request = open_pull_request(
-        api_url=secrets.github_api_url, token=secrets.github_token, owner=owner, repo=repo,
-        head_branch=fix_branch, base_branch=state["base_branch"],
-        title=f"fix: remediate Nexus IQ dependency findings ({state['app_id']})",
+    try:
+        pull_request = open_pull_request(
+            api_url=secrets.github_api_url, token=secrets.github_token, owner=owner, repo=repo,
+            head_branch=fix_branch, base_branch=state["base_branch"],
+            title=f"fix: remediate Nexus IQ dependency findings ({state['app_id']})",
         body=(
             f"Automated dependency remediation by nexus-autofix (agent-orchestrated).\n\n"
             f"- Application: `{state['app_id']}`\n"
             f"- Base branch: `{state['base_branch']}` @ `{state['commit_sha']}`\n"
             f"- Run id: `{run_id}`\n\n"
-            f"Target versions came from Nexus IQ policy analysis, not from the agent. The "
-            f"diff was classified as `{current.classification.value}`, the build and tests "
-            f"passed, and a follow-up IQ scan confirmed the findings cleared."
-        ),
-    )
+                f"Target versions came from Nexus IQ policy analysis, not from the agent. The "
+                f"diff was classified as `{current.classification.value}`, the build and tests "
+                f"passed, and a follow-up IQ scan confirmed the findings cleared."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - the work is done; only the PR call failed
+        # The branch is pushed AND the rescan confirmed the fix, so the valuable part of the
+        # run succeeded. Deleting the branch here would throw that away over a credential
+        # problem, and raising without the compare URL leaves the reader with a verified
+        # branch and no idea what to do with it. Opening the PR by hand finishes the job.
+        compare = f"https://github.com/{owner}/{repo}/compare/{state['base_branch']}...{fix_branch}?expand=1"
+        log.error("the fix is pushed and verified, but opening the PR failed: %s", exc)
+        _agent_json({
+            "ok": False,
+            "stage": "open_pull_request",
+            "message": (
+                "The branch is pushed and Nexus IQ confirmed the findings cleared — only the "
+                "PR call failed, so nothing needs redoing. Open the PR from the URL below."
+            ),
+            "branch": fix_branch,
+            "base_branch": state["base_branch"],
+            "open_a_pr_here": compare,
+            "error": f"{type(exc).__name__}: {exc}",
+            "hint": (
+                "HTTP 401 means NEXUSFIX_GITHUB_TOKEN was rejected — missing, malformed or "
+                "expired. (403 would be a missing 'repo' scope; 404 usually means the token "
+                "needs SSO authorisation for the org.) Pushing used your git credentials, "
+                "which is why that half worked."
+            ),
+        })
+        raise SystemExit(1) from exc
+
     _agent_json({"ok": True, "pull_request_url": pull_request.url,
                  "pull_request_number": pull_request.number, "branch": fix_branch})

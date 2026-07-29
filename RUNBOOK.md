@@ -128,9 +128,12 @@ Again from `run_commands_from`, not from the run directory or `wt/`.
 nexusfix publish --run-id <run_id>
 ```
 
-This commits, pushes the fix branch, rescans it in Nexus IQ to confirm the findings are
-actually gone, and opens a pull request. It refuses to run unless step 3 recorded a
-passing verdict, so run `check` first.
+This commits, pushes the fix branch, and rescans it in Nexus IQ to confirm the findings are
+actually gone. It refuses to run unless step 3 recorded a passing verdict, so run `check`
+first.
+
+It does **not** open the pull request. It prints `open_a_pr_here` — a GitHub compare URL.
+Report that URL to the user and stop; do not try to open the PR yourself.
 
 If the rescan shows the findings are not cleared, it deletes the pushed branch and tells
 you. That means the upgrade did not fix the vulnerability — report it, do not retry

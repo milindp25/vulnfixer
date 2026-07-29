@@ -70,7 +70,7 @@ current directory.
 |---|---|---|
 | `discover` | Scans the branch in Nexus IQ, works out each vulnerable component's target version, prepares a git worktree to edit, writes `run.json`, and prints the findings plus what to do next. | No |
 | `check` | 1. Classifies the diff and **refuses** it if it does anything a dependency fix must not — disabled tests, an IQ waiver, a hand-edited lockfile, `--legacy-peer-deps`, a downgrade. 2. Runs the real **build**. 3. Runs the real **tests**. Records the verdict. | No |
-| `publish` | **Commits**, **pushes** the fix branch, runs a **fresh IQ scan** to confirm the findings cleared, then **opens a PR**. Refuses without a passing `check`. Deletes the pushed branch if the rescan shows the findings are still there. | Yes |
+| `publish` | **Commits**, **pushes** the fix branch, then runs a **fresh IQ scan** to confirm the findings cleared. Prints a GitHub compare URL to open the PR from. Refuses without a passing `check`. Deletes the pushed branch if the rescan shows the findings are still there. | Yes |
 | `run` | All of the above in one command, invoking a coding agent for the editing step. | Yes (unless `--dry-run`) |
 | `gc` | Deletes stale `autofix/nexus/*` branches with no open PR. | Yes |
 
@@ -93,6 +93,12 @@ breaks — `check` and `publish` diff from the commit the worktree was created a
 the changes, so its own assurance is worth nothing — the verdict has to come from a real build
 and a real diff classification, not from anyone's say-so.
 
+**The PR is not opened automatically.** `publish` commits, pushes and rescans, then prints a
+GitHub compare URL for you to open the PR from. That step is the only one needing
+`NEXUSFIX_GITHUB_TOKEN` — pushing uses git's own credentials — so keeping it opt-in means a
+token problem can't fail a run whose real work is already done. Pass `--open-pr` to have it
+call the API instead.
+
 **Which branches:** the branch you pass to `discover` (or `NEXUSFIX_BRANCH`) is used for
 everything, consistently. It's resolved to a commit SHA on the remote, that exact SHA is what
 Nexus IQ scans and what the worktree is created at, and it's the branch the PR **targets**. The
@@ -113,7 +119,8 @@ fails immediately, listing the ones that do.
 | 2 | you or the agent | edit the manifest in `wt/`, leave it uncommitted |
 | 3 | you or the agent | `nexusfix check --run-id …` — diff check, build, tests |
 | 4 | you | read `git diff` in `wt/` — this is your review point |
-| 5 | you or the agent | `nexusfix publish --run-id …` — commit, push, rescan, PR |
+| 5 | you or the agent | `nexusfix publish --run-id …` — commit, push, rescan |
+| 6 | you | open the PR from the compare URL it prints |
 
 Step 5 is the first thing that touches the remote. Stop after step 3 and nothing has left your
 machine.

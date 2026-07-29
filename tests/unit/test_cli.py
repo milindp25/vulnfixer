@@ -464,3 +464,18 @@ def test_the_resolved_executable_degrades_to_the_bare_name(monkeypatch):
 
     monkeypatch.setattr(cli_mod.sys, "argv", ["-m"])
     assert cli_mod._this_executable() == "nexusfix"
+
+
+def test_publish_does_not_open_a_pr_by_default():
+    # Opening the PR is the only step needing NEXUSFIX_GITHUB_TOKEN; pushing uses git's own
+    # credentials. Off by default so a token problem cannot fail a run whose real work — a
+    # verified fix on a pushed branch — is already done.
+    from click import Command
+
+    from nexus_autofix import cli as cli_mod
+
+    assert isinstance(cli_mod.publish_command, Command)
+    option = next(p for p in cli_mod.publish_command.params if p.name == "open_pr")
+    assert option.is_flag is True
+    assert option.default is False
+    assert "open_pr" in {p.name for p in cli_mod.publish_command.params}

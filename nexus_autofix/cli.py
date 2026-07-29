@@ -841,8 +841,14 @@ def check_command(run_id: str, verbose: bool):
 @main.command("publish")
 @click.option("--run-id", required=True, help="The run_id printed by `nexusfix discover`.")
 @click.option("--dry-run", is_flag=True, default=False, help="Do everything except mutate the remote.")
+@click.option(
+    "--open-pr", is_flag=True, default=False,
+    help="Also open the pull request via the GitHub API. Off by default — the branch is "
+         "pushed and verified either way, and the compare URL is printed so you can open "
+         "the PR yourself.",
+)
 @click.option("-v", "--verbose", is_flag=True, default=False)
-def publish_command(run_id: str, dry_run: bool, verbose: bool):
+def publish_command(run_id: str, dry_run: bool, open_pr: bool, verbose: bool):
     """Commit, push, rescan in IQ to confirm the fix, and open a PR.
 
     Refuses without a passing verdict from `check`. That gate is the point: the agent
@@ -939,6 +945,29 @@ def publish_command(run_id: str, dry_run: bool, verbose: bool):
         raise SystemExit(1)
 
     owner, repo = _owner_repo_from_url(state["repo_url"])
+    compare_url = (
+        f"https://github.com/{owner}/{repo}/compare/"
+        f"{state['base_branch']}...{fix_branch}?expand=1"
+    )
+
+    if not open_pr:
+        # Opening the PR is the one step that needs NEXUSFIX_GITHUB_TOKEN; pushing uses
+        # git's own credentials. Keeping it opt-in means a token problem cannot fail a run
+        # whose real work — the verified fix on a pushed branch — is already complete.
+        log.info("branch pushed and verified; not opening a PR (pass --open-pr to)")
+        _agent_json({
+            "ok": True,
+            "branch": fix_branch,
+            "base_branch": state["base_branch"],
+            "pull_request": None,
+            "open_a_pr_here": compare_url,
+            "message": (
+                "Committed, pushed, and Nexus IQ confirmed the findings cleared. No PR was "
+                "opened — open it from the URL above, or re-run with --open-pr."
+            ),
+        })
+        return
+
     try:
         pull_request = open_pull_request(
             api_url=secrets.github_api_url, token=secrets.github_token, owner=owner, repo=repo,
@@ -959,7 +988,6 @@ def publish_command(run_id: str, dry_run: bool, verbose: bool):
         # run succeeded. Deleting the branch here would throw that away over a credential
         # problem, and raising without the compare URL leaves the reader with a verified
         # branch and no idea what to do with it. Opening the PR by hand finishes the job.
-        compare = f"https://github.com/{owner}/{repo}/compare/{state['base_branch']}...{fix_branch}?expand=1"
         log.error("the fix is pushed and verified, but opening the PR failed: %s", exc)
         _agent_json({
             "ok": False,
@@ -970,7 +998,7 @@ def publish_command(run_id: str, dry_run: bool, verbose: bool):
             ),
             "branch": fix_branch,
             "base_branch": state["base_branch"],
-            "open_a_pr_here": compare,
+            "open_a_pr_here": compare_url,
             "error": f"{type(exc).__name__}: {exc}",
             "hint": (
                 "HTTP 401 means NEXUSFIX_GITHUB_TOKEN was rejected — missing, malformed or "

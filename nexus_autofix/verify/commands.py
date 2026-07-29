@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -27,6 +29,8 @@ class CommandResult:
         combined = self.stdout.splitlines() + self.stderr.splitlines()
         return "\n".join(combined[-lines:])
 
+
+log = logging.getLogger(__name__)
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -106,6 +110,11 @@ def run_command(args: list[str], cwd: Path, env: dict[str, str], timeout_seconds
     # Resolve the program against PATH (and PATHEXT on Windows) so `.cmd` shims like
     # npm/yarn/pnpm are found; a no-op for the wrapper paths, which are already absolute.
     args = [resolve_program(args[0], env), *args[1:]] if args else args
+    # The resolved argv, not the requested one: on Windows this is where a bare
+    # `gradlew`/`npm` becomes an absolute .bat/.cmd path, and a wrong resolution is
+    # otherwise invisible until the command mysteriously fails.
+    log.info("exec: %s (cwd=%s)", " ".join(args), cwd)
+    started = time.monotonic()
     # A missing executable or an over-long build is a normal, retryable build
     # failure -- the retry-prompt machinery can act on it. Letting either escape as
     # an exception would instead tear down the whole run.
@@ -121,11 +130,15 @@ def run_command(args: list[str], cwd: Path, env: dict[str, str], timeout_seconds
             shell=False,
         )
     except FileNotFoundError as exc:
+        log.error("command not found: %s. PATH resolution failed for %r.", exc, args[0] if args else "")
         return CommandResult(returncode=127, stdout="", stderr=f"command not found: {exc}")
     except subprocess.TimeoutExpired as exc:
+        log.error("command timed out after %ss: %s", exc.timeout, " ".join(args))
         return CommandResult(
             returncode=124,
             stdout=_as_text(exc.stdout),
             stderr=_as_text(exc.stderr) + f"\n[TIMEOUT after {exc.timeout}s]",
         )
+    log.info("exit %s in %.1fs", proc.returncode, time.monotonic() - started)
+    log.debug("stdout:\n%s\nstderr:\n%s", proc.stdout or "", proc.stderr or "")
     return CommandResult(returncode=proc.returncode, stdout=proc.stdout or "", stderr=proc.stderr or "")

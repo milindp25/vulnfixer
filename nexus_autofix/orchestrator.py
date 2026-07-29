@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import uuid
@@ -20,6 +21,8 @@ from nexus_autofix.verify import commands as commands_mod
 from nexus_autofix.verify import diff as diff_mod
 from nexus_autofix.verify import rescan as rescan_mod
 from nexus_autofix.verify import toolchain as toolchain_mod
+
+log = logging.getLogger(__name__)
 
 VALID_GATES = {mode.value for mode in GateMode}
 
@@ -140,7 +143,17 @@ class Orchestrator:
             for f in filtered.ignore:
                 self._state.record_finding(run_id, f.component, f.package_url, f.current_version, f.target_version, "ignore")
 
+            log.info(
+                "filter: %d actionable, %d escalated, %d ignored (threat level >= %d)",
+                len(filtered.actionable), len(filtered.escalate), len(filtered.ignore),
+                run_config.min_threat_level,
+            )
+            for f in filtered.escalate:
+                log.info("  escalated: %s %s -> %s (%s)", f.component, f.current_version,
+                         f.target_version or "no target", f.escalation_reason or "no remediation offered")
+
             if not filtered.actionable:
+                log.info("nothing actionable — finishing without invoking the agent")
                 return self._finish(
                     run_id, RunOutcome.CLEAN,
                     escalated=filtered.escalate, not_attempted=filtered.escalate,
@@ -155,6 +168,7 @@ class Orchestrator:
                 strategies = []
 
             if not strategies:
+                log.error("no usable strategy in %s — escalating", worktree / ".trident" / "build.yaml")
                 return self._finish(
                     run_id, RunOutcome.ESCALATED,
                     escalated=filtered.escalate + filtered.actionable, not_attempted=filtered.escalate,
@@ -166,6 +180,9 @@ class Orchestrator:
                 # WHOLE worktree — so a Gradle-backend + npm-frontend repo would publish
                 # unverified frontend changes under a FIXED outcome. Per-module sessions
                 # are the design's answer and aren't built yet; escalate honestly.
+                log.error("repo declares %d .trident strategies (%s) — escalating rather than "
+                          "publishing unverified changes from the modules that were not built",
+                          len(strategies), [s.ecosystem for s in strategies])
                 return self._finish(
                     run_id, RunOutcome.ESCALATED,
                     escalated=filtered.escalate + filtered.actionable, not_attempted=filtered.escalate,
@@ -186,6 +203,7 @@ class Orchestrator:
                 if node_version:
                     env = toolchain_mod.resolve_node_env(node_version, run_config.node_toolchains, env).env
             except toolchain_mod.MissingToolchainError as exc:
+                log.error("toolchain unavailable: %s — escalating", exc)
                 return self._finish(
                     run_id, RunOutcome.ESCALATED,
                     escalated=filtered.escalate + filtered.actionable, not_attempted=filtered.escalate,
@@ -198,6 +216,9 @@ class Orchestrator:
             )
             build_cmd = commands_mod.BUILD_COMMANDS[strategy.ecosystem](worktree)
             test_cmd = commands_mod.TEST_COMMANDS[strategy.ecosystem](worktree)
+            log.info("ecosystem=%s java=%s node=%s", strategy.ecosystem, java_version, node_version)
+            log.info("build command: %s", " ".join(build_cmd))
+            log.info("test command:  %s", " ".join(test_cmd))
 
             retry_context: RetryContext | None = None
             for attempt in range(1, run_config.max_attempts + 1):
@@ -206,10 +227,16 @@ class Orchestrator:
                     build_command=" ".join(build_cmd), test_command=" ".join(test_cmd),
                     actionable_findings=filtered.actionable, escalated_findings=filtered.escalate, retry=retry_context,
                 )
+                log.info("=== attempt %d of %d: invoking agent ===", attempt, run_config.max_attempts)
                 self._agent.run(prompt, worktree, env)
                 changed = changed_files_from_git(worktree)
+                log.info("agent changed %d file(s): %s", len(changed), changed or "(none)")
 
                 if not changed:
+                    log.warning(
+                        "the agent made no changes to the worktree. The run stops here — "
+                        "nothing to build, verify or publish."
+                    )
                     self._state.record_attempt(run_id, attempt, None, None, None)
                     return self._finish(
                         run_id, RunOutcome.NO_CHANGES,
@@ -218,7 +245,10 @@ class Orchestrator:
                     )
 
                 diff_result = diff_mod.classify_diff(worktree)
+                log.info("diff classified as %s", diff_result.classification.value)
                 if diff_result.classification == diff_mod.DiffClass.SUSPICIOUS:
+                    log.error("refusing to publish a suspicious diff: %s",
+                              "; ".join(diff_result.suspicious_reasons))
                     self._state.record_attempt(run_id, attempt, None, None, diff_result.classification.value)
                     return self._finish(
                         run_id, RunOutcome.ESCALATED,
@@ -226,8 +256,11 @@ class Orchestrator:
                         attempted_but_unresolved=filtered.actionable, notes=diff_result.suspicious_reasons,
                     )
 
+                log.info("running build...")
                 build_result = commands_mod.run_command(build_cmd, worktree, env, run_config.subprocess_timeout_seconds)
+                log.info("build %s", "passed" if build_result.success else "FAILED")
                 if not build_result.success:
+                    log.warning("build output (tail):\n%s", build_result.tail())
                     diagnostic = None
                     # On the final attempt nothing will ever read diagnostic_tail --
                     # there is no retry prompt to put it in -- so don't pay for the
@@ -243,8 +276,11 @@ class Orchestrator:
                     )
                     continue
 
+                log.info("running tests...")
                 test_result = commands_mod.run_command(test_cmd, worktree, env, run_config.subprocess_timeout_seconds)
+                log.info("tests %s", "passed" if test_result.success else "FAILED")
                 if not test_result.success:
+                    log.warning("test output (tail):\n%s", test_result.tail())
                     self._state.record_attempt(run_id, attempt, True, False, diff_result.classification.value)
                     retry_context = RetryContext(
                         attempt_number=attempt + 1, max_attempts=run_config.max_attempts, files_changed=changed,
@@ -255,11 +291,13 @@ class Orchestrator:
                 self._state.record_attempt(run_id, attempt, True, True, diff_result.classification.value)
 
                 if run_config.gate == GateMode.PRE_PUSH.value:
+                    log.info("gate=pre-push: stopping before push, awaiting approval")
                     return self._finish(
                         run_id, RunOutcome.AWAITING_APPROVAL,
                         fixed=filtered.actionable, escalated=filtered.escalate, not_attempted=filtered.escalate,
                     )
 
+                log.info("committing and pushing %s", run_config.branch)
                 self._commit_fn(worktree, "fix: remediate dependency vulnerabilities via nexus-autofix")
                 self._push_fn(worktree, run_config.branch)
                 pushed = True
@@ -269,6 +307,9 @@ class Orchestrator:
                 rescan_report_id = self._rescan_fn(run_config, worktree)
                 rescan_report = self._iq.fetch_policy_report(run_config.app_id, rescan_report_id)
                 comparison = rescan_mod.compare_reports(baseline_report, rescan_report, target_purls)
+                log.info("rescan %s: still_failing=%s new_findings=%s",
+                         "cleared" if comparison.all_cleared and not comparison.new_findings else "DID NOT CLEAR",
+                         comparison.still_failing, comparison.new_findings)
 
                 if not comparison.all_cleared or comparison.new_findings:
                     notes = [f"still failing: {comparison.still_failing}", f"new findings: {comparison.new_findings}"]
@@ -296,6 +337,7 @@ class Orchestrator:
                             attempted_but_unresolved=filtered.actionable, notes=notes,
                         )
 
+                log.info("opening pull request for %s", run_config.branch)
                 self._open_pr_fn(worktree, run_config.branch)
                 pr_opened = True
                 final_outcome = (
@@ -307,6 +349,8 @@ class Orchestrator:
                     commit_sha=commit_sha,
                 )
 
+            log.error("exhausted all %d attempt(s) without a passing build and test",
+                      run_config.max_attempts)
             return self._finish(
                 run_id, RunOutcome.FAILED_BUILD,
                 escalated=filtered.escalate, not_attempted=filtered.escalate,
@@ -317,6 +361,7 @@ class Orchestrator:
             # IQ, or the PR opener leaves a `runs` row with outcome=NULL forever and,
             # if it happened after the push, an orphaned remote branch with no PR and
             # no record of why.
+            log.exception("run failed with an unhandled exception")
             notes = [f"unhandled exception: {exc!r}"]
             if pushed and not pr_opened:
                 cleanup_note = self._try_delete_remote_branch(worktree, run_config.branch)
@@ -361,6 +406,15 @@ class Orchestrator:
         without also being persisted, and so the finding-disposition lists can't drift
         apart between exit points.
         """
+        # Logged here rather than at each return so the outcome line cannot be missing
+        # from a run, whichever of the dozen exit paths was taken.
+        log.info(
+            "=== outcome: %s === fixed=%d escalated=%d unresolved=%d",
+            outcome.value, len(fixed or []), len(escalated or []),
+            len(attempted_but_unresolved or []),
+        )
+        for note in notes or []:
+            log.info("  note: %s", note)
         self._state.finish_run(run_id, outcome.value, commit_sha=commit_sha)
         return RunResult(
             run_id=run_id,

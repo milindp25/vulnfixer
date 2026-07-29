@@ -531,14 +531,21 @@ class HTTPIQClient:
             json={"componentIdentifier": component_identifier},
         )
         body = resp.json()
-        # UNVERIFIED SHAPE. The nesting below (remediation -> versionChanges -> data ->
-        # componentIdentifier -> coordinates -> version) came from the design doc, not from
-        # a live response. If it is wrong, every component parses to zero versionChanges,
-        # select_target returns None, and the component is escalated as "no remediation
-        # offered" — indistinguishable from IQ genuinely having nothing. So: accept the
-        # payload with or without the "remediation" wrapper, take the version from
-        # whichever of the two known spellings is present, and shout with the raw body if
-        # a non-empty response yields nothing.
+        # VERIFIED AGAINST A LIVE INSTANCE. The full response for one component:
+        #
+        #   {"remediation": {"versionChanges": [
+        #     {"type": "next-no-violations",
+        #      "data": {"component": {
+        #         "packageUrl": "pkg:npm/postcss@8.5.18",
+        #         "hash": null,
+        #         "componentIdentifier": {"format": "npm",
+        #             "coordinates": {"packageId": "postcss", "version": "8.5.18"}},
+        #         "displayName": "postcss : 8.5.18"}}}]}}
+        #
+        # The version sits under data.COMPONENT.componentIdentifier.coordinates.version.
+        # This client previously read data.componentIdentifier... — one level too shallow —
+        # so every change parsed to an empty version string and every component with a
+        # perfectly good offer was escalated as unfixable.
         remediation = body.get("remediation") if isinstance(body, dict) else None
         if not isinstance(remediation, dict):
             remediation = body if isinstance(body, dict) else {}
@@ -550,8 +557,15 @@ class HTTPIQClient:
             if not isinstance(vc, dict):
                 continue
             data = vc.get("data") if isinstance(vc.get("data"), dict) else {}
-            coordinates = data.get("componentIdentifier", {}).get("coordinates", {})
-            version = (coordinates or {}).get("version") or data.get("version") or ""
+            component = data.get("component") if isinstance(data.get("component"), dict) else {}
+            version = (
+                component.get("componentIdentifier", {}).get("coordinates", {}).get("version")
+                # Fallbacks for shapes seen in no live response, kept only so a variant
+                # degrades to a warning below rather than a silent empty version.
+                or data.get("componentIdentifier", {}).get("coordinates", {}).get("version")
+                or data.get("version")
+                or ""
+            )
             version_changes.append(
                 VersionChange(change_type=vc.get("type", ""), version=str(version))
             )

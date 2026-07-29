@@ -100,3 +100,13 @@ def test_unknown_bump_is_escalated_not_guessed():
     )
     assert len(result.escalate) == 1
     assert not result.actionable
+
+
+def test_an_empty_target_version_is_not_actionable():
+    # A misparsed remediation response yields target_version == "", which passed the old
+    # `is not None` check, reached classify_bump("8.5.18", ""), and was escalated as an
+    # UNKNOWN bump — hiding the parse failure behind a plausible-looking outcome.
+    assert _finding(target_version="").is_actionable is False
+    result = filter_findings([_finding(target_version="")], suppressed_components=set())
+    assert len(result.escalate) == 1
+    assert not result.actionable

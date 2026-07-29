@@ -29,7 +29,11 @@ class Finding:
 
     @property
     def is_actionable(self) -> bool:
-        return self.target_version is not None
+        # Truthiness, not `is not None`: a target of "" is what a misparsed remediation
+        # response produces, and it passed the None check, so the finding reached the
+        # bump classifier as a real target and was escalated as an UNKNOWN bump instead
+        # of being reported as having no remediation at all.
+        return bool(self.target_version)
 
 
 @dataclass(frozen=True)

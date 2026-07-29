@@ -633,22 +633,37 @@ def _remediation_response(payload):
     )
 
 
+# Transcribed verbatim from a real 549-byte remediation response. The version lives
+# under data.COMPONENT.componentIdentifier.coordinates.version — note the "component"
+# level, which this client used to skip.
 _VERSION_CHANGE = {
     "type": "next-no-violations",
-    "data": {"componentIdentifier": {"format": "npm", "coordinates": {"packageId": "axios", "version": "2.5.0"}}},
+    "data": {
+        "component": {
+            "packageUrl": "pkg:npm/postcss@8.5.18",
+            "hash": None,
+            "componentIdentifier": {
+                "format": "npm",
+                "coordinates": {"packageId": "postcss", "version": "8.5.18"},
+            },
+            "displayName": "postcss : 8.5.18",
+        }
+    },
 }
 
 
-def test_version_changes_are_read_from_the_remediation_wrapper():
+def test_the_real_remediation_response_yields_a_usable_target_version():
+    # The live regression: this parsed to version "" because the "component" level was
+    # skipped, so a good next-no-violations offer was escalated as unfixable.
     result = _remediation_response({"remediation": {"versionChanges": [_VERSION_CHANGE]}})
     assert [(v.change_type, v.version) for v in result.version_changes] == [
-        ("next-no-violations", "2.5.0")
+        ("next-no-violations", "8.5.18")
     ]
 
 
 def test_version_changes_are_read_without_the_remediation_wrapper():
     result = _remediation_response({"versionChanges": [_VERSION_CHANGE]})
-    assert result.version_changes[0].version == "2.5.0"
+    assert result.version_changes[0].version == "8.5.18"
 
 
 def test_a_flat_version_field_is_also_accepted():

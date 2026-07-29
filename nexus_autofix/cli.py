@@ -616,6 +616,7 @@ def perform_discovery(
     java_version = strategy.toolchain.get("java")
     node_version = strategy.toolchain.get("node")
 
+    views = agent_api.finding_views(findings, config.min_threat_level)
     state = {
         "run_id": run_id,
         "run_dir": str(run_dir),
@@ -631,19 +632,23 @@ def perform_discovery(
         "java_version": java_version,
         "node_version": node_version,
         "target_purls": [f.package_url for f in findings if f.is_actionable],
+        "build_command": " ".join(commands_mod.BUILD_COMMANDS[strategy.ecosystem](worktree.path)),
+        "test_command": " ".join(commands_mod.TEST_COMMANDS[strategy.ecosystem](worktree.path)),
+        # The findings go in run.json, not just on stdout. Whoever runs `discover` is often
+        # not who does the editing: you run it, then hand a run_id to an agent in an editor
+        # that never saw the stdout. Without them here its only options are to re-run
+        # discover — a second IQ scan and a second worktree — or to scrape nexusfix.log,
+        # which is human prose with no stable format.
+        "findings": [asdict(v) for v in views],
     }
     agent_api.save_run_state(run_dir, state)
 
     runbook = agent_api.place_runbook(run_dir)
-    views = agent_api.finding_views(findings, config.min_threat_level)
     log.info("discover %s prepared %s with %d finding(s)", run_id, worktree.path, len(views))
     return {
-        **{k: state[k] for k in ("run_id", "run_dir", "worktree", "fix_branch", "ecosystem")},
+        **state,
         "runbook": str(runbook) if runbook else None,
         "open_this_in_your_editor": str(run_dir),
-        "build_command": " ".join(commands_mod.BUILD_COMMANDS[strategy.ecosystem](worktree.path)),
-        "test_command": " ".join(commands_mod.TEST_COMMANDS[strategy.ecosystem](worktree.path)),
-        "findings": [asdict(v) for v in views],
     }
 
 

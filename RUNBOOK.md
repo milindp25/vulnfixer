@@ -8,17 +8,26 @@ Replace `nexusfix` below with the path to the executable if it is not on your PA
 
 ---
 
-## Step 1 — Discover what needs fixing
+## Step 1 — Find out what needs fixing
+
+**If you were given a `run_id`**, the work has already been done. Read `run.json` in this
+same directory and use what is in it. Do **not** run `discover` again — that would start a
+second Nexus IQ scan and create a second worktree.
+
+**Only if you were not given a `run_id`**, run:
 
 ```
 nexusfix discover
 ```
 
-This talks to Nexus IQ, scans the branch, works out which components need upgrading and
-to which versions, and prepares a git worktree for you to edit. It changes nothing in the
-repository you are sitting in.
+Either way you end up with the same information. `discover` talks to Nexus IQ, scans the
+branch, works out which components need upgrading and to which versions, prepares a git
+worktree, and writes all of it to `run.json`.
 
-It prints:
+Do not read `nexusfix.log` for this. It is a human-readable trace with no stable format —
+`run.json` is the machine-readable source of truth.
+
+The fields:
 
 ```json
 {
@@ -44,7 +53,16 @@ It prints:
 }
 ```
 
-**Read `findings` carefully.**
+**Read `findings` carefully. It is the only list you act on.**
+
+Each entry states the change to make outright — you do not work out, look up or choose any
+version yourself. The example above means exactly:
+
+> upgrade `brace-expansion` from `5.0.7` to `5.0.8`
+
+Ignore `target_purls` if you see it in `run.json`. It is internal bookkeeping for the
+post-fix rescan, and the versions in it are the CURRENT ones — acting on it would leave
+everything as it is.
 
 - Only work on entries with `"actionable": true`. An entry with `"actionable": false`
   has a `reason_not_actionable` — report it to the user and leave it alone.

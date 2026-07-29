@@ -93,3 +93,101 @@ def test_findings_from_policy_report_marks_finding_unactionable_without_remediat
     assert findings[0].target_version is None
     assert findings[0].remediation_type is None
     assert findings[0].is_actionable is False
+
+
+# --------------------------------------------------------------------------------------
+# Remediation is one POST per component against a live IQ instance. These lock in that it
+# is only spent where it can change the outcome, and that a rejected component does not
+# take the rest of the application down with it.
+# --------------------------------------------------------------------------------------
+
+
+def _violation(**overrides) -> PolicyViolation:
+    base = dict(
+        package_url="pkg:npm/axios@1.6.0", component="axios", policy_name="Security-High",
+        policy_id="p1", threat_level=9, constraint_summary="CVE", is_waived=False,
+        action="SECURITY",
+        component_identifier={"format": "npm", "coordinates": {"packageId": "axios", "version": "1.6.0"}},
+        current_version="1.6.0",
+    )
+    base.update(overrides)
+    return PolicyViolation(**base)
+
+
+class _CountingClient(FakeIQClient):
+    """Counts remediation calls; optionally rejects one component the way IQ does."""
+
+    def __init__(self, reject_component: str | None = None):
+        super().__init__()
+        self.calls: list[dict] = []
+        self._reject = reject_component
+
+    def fetch_remediation(self, internal_id, component_identifier, stage_id):
+        self.calls.append(component_identifier)
+        package_id = (component_identifier or {}).get("coordinates", {}).get("packageId")
+        if self._reject is not None and package_id == self._reject:
+            raise RuntimeError("400 Client Error: invalid component identifier packageUrl")
+        return RemediationResponse(version_changes=[])
+
+
+def test_below_threshold_components_never_cost_a_remediation_call():
+    client = _CountingClient()
+    violations = [
+        _violation(threat_level=5, component="eol-thing"),
+        _violation(threat_level=9, component="axios"),
+    ]
+
+    findings = findings_from_policy_report(client, "app-1", violations, "build", min_threat_level=8)
+
+    assert len(client.calls) == 1, "only the level-9 component should be looked up"
+    assert client.calls[0]["coordinates"]["packageId"] == "axios"
+    assert len(findings) == 2, "the skipped component is still reported, just not remediated"
+    skipped = next(f for f in findings if f.component == "eol-thing")
+    assert skipped.escalation_reason == "threat level 5 below threshold 8"
+
+
+def test_waived_components_never_cost_a_remediation_call():
+    client = _CountingClient()
+    findings = findings_from_policy_report(
+        client, "app-1", [_violation(is_waived=True)], "build", min_threat_level=0
+    )
+    assert client.calls == []
+    assert findings[0].is_waived is True
+
+
+def test_a_rejected_component_escalates_and_the_run_continues():
+    # The live failure: HTTP 400 "invalid component identifier packageUrl" on one component.
+    # Before this, the exception propagated and the whole application run died on it.
+    client = _CountingClient(reject_component="broken")
+    violations = [
+        _violation(component="broken", component_identifier={
+            "format": "npm", "coordinates": {"packageId": "broken", "version": "1.0"}}),
+        _violation(component="axios"),
+    ]
+
+    findings = findings_from_policy_report(client, "app-1", violations, "build", min_threat_level=8)
+
+    assert len(findings) == 2, "the good component is still processed"
+    broken = next(f for f in findings if f.component == "broken")
+    assert broken.is_actionable is False
+    assert "remediation lookup failed" in broken.escalation_reason
+    assert "invalid component identifier" in broken.escalation_reason
+
+
+def test_iq_identifier_is_preferred_over_one_rebuilt_from_the_purl():
+    # The purl percent-encodes the "@"; IQ's own coordinates do not. Sending the rebuilt
+    # one is what IQ rejects.
+    client = _CountingClient()
+    violation = _violation(
+        package_url="pkg:npm/%40dfs-react-ui/core@1.4.6",
+        component="@dfs-react-ui/core",
+        component_identifier={
+            "format": "npm",
+            "coordinates": {"packageId": "@dfs-react-ui/core", "version": "1.4.6"},
+        },
+    )
+
+    findings_from_policy_report(client, "app-1", [violation], "build", min_threat_level=8)
+
+    assert client.calls[0]["coordinates"]["packageId"] == "@dfs-react-ui/core"
+    assert "%40" not in client.calls[0]["coordinates"]["packageId"]

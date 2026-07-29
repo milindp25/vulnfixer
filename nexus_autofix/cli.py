@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import uuid
@@ -79,16 +80,85 @@ def purl_to_component_identifier(purl: str) -> dict:
     return {"format": purl_type, "coordinates": {"name": rest, "version": version}}
 
 
-def findings_from_policy_report(iq_client, internal_id: str, violations, stage_id: str) -> list[Finding]:
-    """Turn IQ policy violations into Findings, fetching remediation advice for each."""
+def _finding_without_remediation(v, reason: str) -> Finding:
+    """A Finding for a component we deliberately did not ask IQ to remediate.
+
+    `target_version=None` makes it non-actionable, so the filter routes it to ignore (if it
+    is below the threat threshold or waived) or to escalate (if the lookup failed), and it
+    never reaches the agent.
+    """
+    return Finding(
+        component=v.component,
+        package_url=v.package_url,
+        current_version=getattr(v, "current_version", "") or purl_version(v.package_url),
+        target_version=None,
+        remediation_type=None,
+        is_direct=getattr(v, "is_direct", True),
+        dependency_path=list(getattr(v, "parent_purls", []) or []),
+        parent_component=None,
+        parent_current_version=None,
+        parent_target_version=None,
+        policy_action=v.action,
+        threat_level=v.threat_level,
+        policy_name=v.policy_name,
+        cve_ids=[],
+        manifest_path=None,
+        is_waived=v.is_waived,
+        escalation_reason=reason,
+    )
+
+
+def findings_from_policy_report(
+    iq_client, internal_id: str, violations, stage_id: str, min_threat_level: int = 0
+) -> list[Finding]:
+    """Turn IQ policy violations into Findings, fetching remediation advice for each.
+
+    Remediation is one POST per component, so it is only spent on components that can
+    actually be acted on. A large application reports violations on hundreds of components
+    — mostly low-threat QUALITY ones — and asking IQ to remediate every one of them is
+    hundreds of pointless round trips before the threat-level gate throws the answers away.
+    The gate is therefore applied here, before the call, not after it.
+
+    A remediation lookup that fails is not fatal to the run: the component is escalated for
+    a human with IQ's own reason attached, and the remaining components still get their
+    chance. One rejected component identifier must not sink the whole application.
+    """
     findings = []
+    skipped = 0
     for v in violations:
+        if v.is_waived:
+            findings.append(_finding_without_remediation(v, "waived in IQ"))
+            skipped += 1
+            continue
+        if v.threat_level < min_threat_level:
+            findings.append(
+                _finding_without_remediation(
+                    v, f"threat level {v.threat_level} below threshold {min_threat_level}"
+                )
+            )
+            skipped += 1
+            continue
         # Prefer IQ's own identifier over one rebuilt from the purl — see
         # purl_to_component_identifier for why the rebuild is lossy.
         identifier = getattr(v, "component_identifier", None) or purl_to_component_identifier(
             v.package_url
         )
-        remediation = iq_client.fetch_remediation(internal_id, identifier, stage_id)
+        try:
+            remediation = iq_client.fetch_remediation(internal_id, identifier, stage_id)
+        except Exception as exc:  # noqa: BLE001 - one bad component must not sink the run
+            log.error(
+                "remediation lookup failed for %s (purl %s)\n"
+                "  identifier sent: %s\n"
+                "  %s: %s\n"
+                "  -> escalating this component for manual review and continuing",
+                v.component, v.package_url,
+                json.dumps(identifier, default=str),
+                type(exc).__name__, exc,
+            )
+            findings.append(
+                _finding_without_remediation(v, f"remediation lookup failed: {exc}")
+            )
+            continue
         version_change = remediation_mod.select_target(remediation)
         findings.append(
             Finding(
@@ -110,6 +180,12 @@ def findings_from_policy_report(iq_client, internal_id: str, violations, stage_i
                 is_waived=v.is_waived,
                 golden_version=remediation.golden_version,
             )
+        )
+    if skipped:
+        log.info(
+            "skipped remediation lookup for %d component(s) that cannot be acted on "
+            "(waived, or below threat level %d) — %d lookup(s) actually sent",
+            skipped, min_threat_level, len(violations) - skipped,
         )
     return findings
 
@@ -191,9 +267,11 @@ def perform_run(
     violations = iq_client.fetch_policy_report(app_id, baseline_report_id)
     log.info("baseline report %s: %d policy violation(s)", baseline_report_id, len(violations))
 
-    log.info("fetching remediation advice for %d component(s)...", len(violations))
+    log.info(
+        "fetching remediation advice (threat level >= %d only)...", config.min_threat_level
+    )
     findings = findings_from_policy_report(
-        iq_client, internal_id, violations, config.default_stage_id
+        iq_client, internal_id, violations, config.default_stage_id, config.min_threat_level
     )
     for f in findings:
         log.info("  finding: %s %s -> %s (%s)",

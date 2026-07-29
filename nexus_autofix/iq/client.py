@@ -308,15 +308,23 @@ class HTTPIQClient:
     # full response body at ERROR when a call fails (IQ puts the real reason there).
     # Credentials are passed via `auth=` and never logged.
 
-    def _log_response(self, method: str, url: str, resp, started: float) -> None:
+    def _log_response(self, method: str, url: str, resp, started: float, request_body=None) -> None:
         elapsed = time.monotonic() - started
         log.info("IQ %s %s -> HTTP %s in %.2fs", method, url, getattr(resp, "status_code", "?"), elapsed)
         try:
             resp.raise_for_status()
         except requests.HTTPError:
+            # The request body goes in the ERROR log too, not just DEBUG: a 4xx is almost
+            # always a complaint about what was sent, and reading IQ's objection without
+            # seeing what it objected to means turning DEBUG on and reproducing the failure.
+            sent = (
+                f"\n  request body: {json.dumps(request_body, default=str)}"
+                if request_body is not None else ""
+            )
             log.error(
-                "IQ %s %s failed with HTTP %s. Response body:\n%s",
-                method, url, getattr(resp, "status_code", "?"), _truncate(getattr(resp, "text", "")),
+                "IQ %s %s failed with HTTP %s.%s\n  response body:\n%s",
+                method, url, getattr(resp, "status_code", "?"), sent,
+                _truncate(getattr(resp, "text", "")),
             )
             raise
         log.debug("IQ %s %s response body:\n%s", method, url, _truncate(getattr(resp, "text", "")))
@@ -331,7 +339,7 @@ class HTTPIQClient:
         except requests.RequestException as exc:
             log.error("IQ GET %s raised %s: %s", url, type(exc).__name__, exc)
             raise
-        self._log_response("GET", url, resp, started)
+        self._log_response("GET", url, resp, started, request_body=kwargs.get("params"))
         return resp
 
     def _post(self, url: str, **kwargs):
@@ -346,7 +354,7 @@ class HTTPIQClient:
         except requests.RequestException as exc:
             log.error("IQ POST %s raised %s: %s", url, type(exc).__name__, exc)
             raise
-        self._log_response("POST", url, resp, started)
+        self._log_response("POST", url, resp, started, request_body=kwargs.get("json"))
         return resp
 
     # -- endpoints --------------------------------------------------------
@@ -478,6 +486,16 @@ class HTTPIQClient:
         return violations
 
     def fetch_remediation(self, internal_id: str, component_identifier: dict, stage_id: str) -> RemediationResponse:
+        # IQ answers a malformed identifier with a flat 400 ("invalid component identifier"),
+        # which reads like a server problem. Catching the empty case here names the actual
+        # cause — an identifier that could not be built — and costs no round trip.
+        coordinates = (component_identifier or {}).get("coordinates") or {}
+        if not coordinates:
+            raise ValueError(
+                "refusing to request remediation with an empty component identifier: "
+                f"{json.dumps(component_identifier, default=str)}. IQ needs populated "
+                "coordinates; the policy report supplies them per component."
+            )
         resp = self._post(
             f"{self._base_url}/api/v2/components/remediation/application/{internal_id}",
             params={"stageId": stage_id, "includeParentRemediation": "true"},

@@ -1,6 +1,8 @@
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from nexus_autofix.iq.client import (
     FakeIQClient,
@@ -551,3 +553,34 @@ def test_a_quality_eol_violation_below_the_threshold_is_not_actioned():
 
     findings = findings_from_policy_report(_NoRemediation(), "app-1", [_live_violation()], "build")
     assert filter_findings(findings, suppressed_components=set()).ignore
+
+
+def test_an_empty_component_identifier_is_rejected_before_the_call():
+    # IQ answers this with a bare 400 "invalid component identifier", which reads like a
+    # server fault. Failing here names the real cause and spends no round trip.
+    session = MagicMock()
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    with pytest.raises(ValueError, match="empty component identifier"):
+        client.fetch_remediation("app-1", {"format": "unknown", "coordinates": {}}, "build")
+
+    session.post.assert_not_called()
+
+
+def test_a_failed_post_logs_the_request_body_that_was_rejected(caplog):
+    session = MagicMock()
+    resp = MagicMock(status_code=400, text='{"message": "invalid component identifier packageUrl"}')
+    resp.raise_for_status.side_effect = requests.HTTPError("400 Client Error")
+    session.post.return_value = resp
+    client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
+
+    with caplog.at_level(logging.ERROR), pytest.raises(requests.HTTPError):
+        client.fetch_remediation(
+            "app-1",
+            {"format": "npm", "coordinates": {"packageId": "%40scope/pkg", "version": "1.0"}},
+            "build",
+        )
+
+    logged = caplog.text
+    assert "invalid component identifier packageUrl" in logged, "IQ's objection"
+    assert "%40scope/pkg" in logged, "and what it objected to"

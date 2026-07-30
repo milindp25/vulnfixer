@@ -137,8 +137,35 @@ the build to see it.
    nexusfix remediate io.netty:netty-resolver-dns:4.1.100.Final --run-id <run_id>
    ```
 
-   Use the `target_version` it returns. If it returns `null`, the component cannot be fixed
-   by bumping it — report that and stop.
+   Pass the component in whichever of these forms matches what the error gave you. Do not
+   try to build the coordinates yourself — the keys differ per ecosystem and the wrong ones
+   are rejected:
+
+   | Ecosystem | Write it as | Example |
+   |---|---|---|
+   | Maven / Gradle | `group:artifact:version` | `io.netty:netty-resolver-dns:4.1.100.Final` |
+   | Maven with a type | `group:artifact:version:extension` | `io.netty:netty-bom:4.1.100.Final:pom` |
+   | npm / yarn / pnpm | `name@version` | `postcss@8.5.10` |
+   | scoped npm | `@scope/name@version` | `@charlietango/use-focus-trap@1.4.0` |
+   | anything, as a purl | `pkg:<type>/<name>@<version>` | `pkg:maven/io.netty/netty-codec-http@4.1.100.Final` |
+
+   Run it from the directory in `run_commands_from` (see `run.json`), as with `check` and
+   `publish`.
+
+   It returns:
+
+   ```json
+   {
+     "current_version": "4.1.100.Final",
+     "target_version": "4.1.118.Final",
+     "remediation_type": "next-no-violations-with-dependencies",
+     "all_offers": [ ... ],
+     "message": "Upgrade to 4.1.118.Final."
+   }
+   ```
+
+   Use `target_version` exactly. If it is `null`, the component cannot be fixed by bumping
+   it — report that and stop.
 3. Quarantined components are usually transitive, so the manifest will not name them. Find
    the parent that pulls it in:
 

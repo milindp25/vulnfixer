@@ -541,3 +541,64 @@ def test_an_unreadable_spec_shows_the_accepted_forms():
 
     with pytest.raises(click.ClickException, match="io.netty:netty-codec-http"):
         component_spec_to_identifier("just-a-name")
+
+
+def test_an_unexpected_failure_puts_its_traceback_in_the_run_log(tmp_path, monkeypatch):
+    """The log file is what gets handed over when someone asks for help.
+
+    Each command converts an unexpected exception into a one-line ClickException so the
+    console stays readable. If that were all, the stack frames would exist nowhere — and
+    the one artefact that gets shared would be the one that cannot say where it broke.
+    """
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from nexus_autofix import agent_api
+    from nexus_autofix import cli as cli_mod
+
+    (tmp_path / "config.yml").write_text(
+        "repos:\n  demo: https://example.com/o/demo.git\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "ws"
+    monkeypatch.setenv("NEXUSFIX_WORKSPACE_ROOT", str(workspace))
+    for var in ("IQ_URL", "IQ_USERNAME", "IQ_PASSWORD"):
+        monkeypatch.setenv(f"NEXUSFIX_{var}", "x")
+
+    run_dir = workspace / "runs" / "r1"
+    agent_api.save_run_state(run_dir, {
+        "run_id": "r1",
+        "run_dir": str(run_dir),
+        "worktree": str(run_dir / "wt"),
+        "ecosystem": "npm",
+        "commit_sha": "deadbeef",
+        "run_commands_from": str(tmp_path),
+    })
+
+    boom = RuntimeError("something deep in the diff walker went wrong")
+    with patch.object(agent_api, "check_worktree", side_effect=boom):
+        result = CliRunner().invoke(cli_mod.check_command, ["--run-id", "r1"])
+
+    assert result.exit_code != 0
+    # The console gets the short form...
+    assert "RuntimeError: something deep in the diff walker went wrong" in result.output
+    assert "Traceback" not in result.output
+    # ...and the log file keeps the frames.
+    logged = (run_dir / "nexusfix.log").read_text(encoding="utf-8")
+    assert "Traceback (most recent call last)" in logged
+    assert "something deep in the diff walker went wrong" in logged
+    assert "nexusfix check" in logged
+
+
+def test_every_agent_facing_command_logs_its_failures():
+    """Introspective, so a command added later is covered without editing this test."""
+    from nexus_autofix import cli as cli_mod
+
+    for name in ("discover", "check", "publish", "remediate"):
+        command = getattr(cli_mod, f"{name}_command")
+        assert getattr(command.callback, "__wrapped__", None) is not None, (
+            f"`{name}` is not wrapped in @logs_failures, so an unexpected exception "
+            "reaches the console as a one-liner and leaves no traceback in nexusfix.log — "
+            "which is the file a user sends when asking why it broke"
+        )

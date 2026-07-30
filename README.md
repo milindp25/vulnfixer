@@ -129,6 +129,21 @@ machine.
 Add `-v` to any command for full IQ request/response bodies on the console. They're always in
 `<workspace_root>/runs/<run-id>/nexusfix.log` regardless. Credentials are never logged.
 
+### When something fails, send the log
+
+`<workspace_root>/runs/<run-id>/nexusfix.log` is written at DEBUG on every command, and it is
+the one file worth handing over. It has what the console does not:
+
+- every IQ request and the **full response body** — the fastest way to settle "IQ says X but
+  the tool did Y"
+- the **complete build and test output**, not the 200-line tail the console shows — this is
+  where a `403 quarantined` or a resolution failure actually appears
+- the **stack trace** of any unexpected crash. The console deliberately shows a one-line
+  `TypeError: …` instead of a wall of frames, so without the file the frames are gone.
+
+The whole file is safe to share: credentials go via `auth=` and an `Authorization` header, and
+request headers are never logged.
+
 ---
 
 ## How it works

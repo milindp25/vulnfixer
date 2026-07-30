@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -291,6 +292,40 @@ def findings_from_policy_report(
     log.info("remediation: %d POST(s) sent, %d skipped as below the bar or waived",
              looked_up, skipped)
     return findings
+
+
+def logs_failures(command: str):
+    """Write the traceback to the run log before the console gets the one-liner.
+
+    Each command turns an unexpected exception into a short ClickException so the console
+    stays readable, and `nexusfix.log` is the artefact somebody hands over when asking for
+    help. Those two facts combine badly without this: the one file that gets shared would
+    be the one missing the stack frames that say where it broke.
+
+    Deliberate exits pass through untouched — a ClickException is already a written
+    explanation, and SystemExit is how a checked failure (a failed rescan, say) reports
+    itself after printing its own JSON.
+
+    The frames go out at DEBUG, which is exactly the split the two sinks were built for:
+    the file handler is always DEBUG so they are always kept, the console handler is INFO
+    so they stay off the terminal, and `-v` puts them on both.
+    """
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except (click.ClickException, click.Abort, SystemExit):
+                raise
+            except Exception as exc:
+                log.debug(
+                    "`nexusfix %s` failed with an unhandled exception", command, exc_info=True
+                )
+                raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
+
+        return wrapper
+
+    return decorate
 
 
 @click.group()
@@ -819,6 +854,7 @@ def _echo_next_steps(payload: dict) -> None:
 @click.option("--app-id", default=None, help="IQ public application ID. Defaults to $NEXUSFIX_APP_ID.")
 @click.option("--branch", default=None, help="Branch to scan. Defaults to $NEXUSFIX_BRANCH.")
 @click.option("-v", "--verbose", is_flag=True, default=False)
+@logs_failures("discover")
 def discover_command(app_id: str | None, branch: str | None, verbose: bool):
     """Find what needs fixing and prepare a worktree, without touching the agent.
 
@@ -836,10 +872,7 @@ def discover_command(app_id: str | None, branch: str | None, verbose: bool):
         raise click.ClickException(f"no repo URL configured for app_id={app_id!r} in config.yml")
     _require_secrets(secrets, dry_run=True)
 
-    try:
-        payload = perform_discovery(app_id, branch, config, secrets, verbose)
-    except Exception as exc:
-        raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
+    payload = perform_discovery(app_id, branch, config, secrets, verbose)
     _agent_json(payload)
     _echo_next_steps(payload)
 
@@ -865,6 +898,7 @@ def _config_for_run(state: dict) -> ProjectConfig:
 @main.command("check")
 @click.option("--run-id", required=True, help="The run_id printed by `nexusfix discover`.")
 @click.option("-v", "--verbose", is_flag=True, default=False)
+@logs_failures("check")
 def check_command(run_id: str, verbose: bool):
     """Classify the diff, then build and test the worktree. Records the verdict."""
     secrets = load_secrets()
@@ -901,6 +935,7 @@ def check_command(run_id: str, verbose: bool):
          "the PR yourself.",
 )
 @click.option("-v", "--verbose", is_flag=True, default=False)
+@logs_failures("publish")
 def publish_command(run_id: str, dry_run: bool, open_pr: bool, verbose: bool):
     """Commit, push, rescan in IQ to confirm the fix, and open a PR.
 
@@ -1071,6 +1106,7 @@ def publish_command(run_id: str, dry_run: bool, open_pr: bool, verbose: bool):
 @click.option("--run-id", default=None, help="Use the application from an existing run.")
 @click.option("--app-id", default=None, help="IQ public application ID. Defaults to $NEXUSFIX_APP_ID.")
 @click.option("-v", "--verbose", is_flag=True, default=False)
+@logs_failures("remediate")
 def remediate_command(component: str, run_id: str | None, app_id: str | None, verbose: bool):
     """Ask Nexus IQ what version of COMPONENT clears the policy.
 
@@ -1108,10 +1144,7 @@ def remediate_command(component: str, run_id: str | None, app_id: str | None, ve
         ).resolve_application_internal_id(app_id)
 
     iq_client = HTTPIQClient(secrets.iq_url, secrets.iq_username, secrets.iq_password)
-    try:
-        remediation = iq_client.fetch_remediation(internal_id, identifier, config.default_stage_id)
-    except Exception as exc:
-        raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
+    remediation = iq_client.fetch_remediation(internal_id, identifier, config.default_stage_id)
 
     chosen = remediation_mod.select_target(remediation, component, current_version)
     _agent_json({

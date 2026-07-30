@@ -207,6 +207,15 @@ blindly.
 
 ---
 
+## If you get stuck
+
+Stop and report rather than trying more variations. Point the user at
+`nexusfix.log` in this directory — it holds the full IQ responses, the complete build and
+test output, and the stack trace of anything that crashed, none of which is on the console.
+Say which step failed and what the last command you ran was.
+
+---
+
 ## Reporting back
 
 When you are done, tell the user:

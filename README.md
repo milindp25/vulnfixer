@@ -68,7 +68,7 @@ current directory.
 
 | Command | What it does | Touches the remote? |
 |---|---|---|
-| `discover` | Scans the branch in Nexus IQ, works out each vulnerable component's target version, prepares a git worktree to edit, writes `run.json`, and prints the findings plus what to do next. | No |
+| `discover` | Scans the branch in Nexus IQ, works out each vulnerable component's target version, prepares a checkout to edit, writes `run.json`, and prints the findings plus what to do next. | No |
 | `check` | 1. Classifies the diff and **refuses** it if it does anything a dependency fix must not — disabled tests, an IQ waiver, a hand-edited lockfile, `--legacy-peer-deps`, a downgrade. 2. Runs the real **build**. 3. Runs the real **tests**. Records the verdict. | No |
 | `publish` | **Commits**, **pushes** the fix branch, then runs a **fresh IQ scan** to confirm the findings cleared. Prints a GitHub compare URL to open the PR from. Refuses without a passing `check`. Deletes the pushed branch if the rescan shows the findings are still there. | Yes |
 | `run` | All of the above in one command, invoking a coding agent for the editing step. | Yes (unless `--dry-run`) |
@@ -241,6 +241,16 @@ doc, not from a real install. It fails loudly rather than reporting "no changes"
 binary, a non-zero exit or a timeout each raise with the command and the CLI's own output. On an
 org that blocks unattended tool use it reports *"Access denied by policy settings"*; use
 `--interactive-agent` or the agent-orchestrated mode.
+
+**`wt/` is a clone, not a `git worktree`.** It used to be a worktree — cheaper and faster,
+but in one `.git` is a *file* holding `gitdir: <path>`, and the directory it points at has no
+`objects/`, only a `commondir` pointing back to the shared repo. Build tooling that opens
+`.git` expecting a directory breaks: Gradle's `gradle-git-properties` fails its
+`generateGitProperties` task with `org.eclipse.jgit.errors.RepositoryNotFoundException`, and
+Maven's `buildnumber-maven-plugin` and some IDE integrations fail similarly. Those look like
+the dependency bump broke the build. Cloning from the local mirror hardlinks the object
+store, so it stays cheap, and `origin` is re-pointed at the real remote so `publish` pushes
+where it should. Don't "optimise" it back.
 
 **Two IQ fields are still unverified:** `parentRemediation` and `goldenVersion`. Neither has
 appeared in a live response. If a transitive finding shows empty parent-bump advice, check those

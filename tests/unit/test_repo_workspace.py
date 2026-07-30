@@ -44,20 +44,109 @@ def test_create_and_remove_worktree(tmp_path):
     assert not worktree.path.exists()
 
 
-def test_remove_worktree_returns_false_after_exhausting_retries(tmp_path):
-    # A worktree path that was never actually created via `git worktree add` — every
-    # `git worktree remove` attempt against it fails, exercising the retry-exhaustion
-    # path. `time.sleep` is mocked so this doesn't really wait retries * delay_seconds.
+def test_the_checkout_has_a_real_dot_git_directory(tmp_path):
+    """The whole reason this is a clone and not a `git worktree`.
+
+    In a linked worktree `.git` is a file holding `gitdir: <path>`, and build tooling that
+    goes through JGit (Gradle's `gradle-git-properties`) or otherwise assumes the classic
+    layout fails with `RepositoryNotFoundException`. That looks like the dependency bump
+    broke the build, which is the most expensive kind of wrong.
+    """
     mirror = tmp_path / "mirror"
     mirror.mkdir()
-    _init_mirror(mirror)
-    bogus_worktree = Worktree(path=tmp_path / "does-not-exist", branch="autofix/nexus/missing")
+    sha = _init_mirror(mirror)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
 
-    with patch("nexus_autofix.repo.workspace.time.sleep") as mock_sleep:
-        removed = remove_worktree(mirror, bogus_worktree, retries=3, delay_seconds=2.0)
+    worktree = create_worktree(mirror, run_dir, sha, "autofix/nexus/test-1")
+
+    dot_git = worktree.path / ".git"
+    assert dot_git.is_dir(), (
+        f"{dot_git} is not a directory — this is a linked git worktree again. Build "
+        "tooling that reads .git directly breaks in one."
+    )
+    assert (dot_git / "objects").is_dir()
+    assert not (dot_git / "commondir").exists()
+
+
+def test_a_commit_only_on_a_remote_tracking_ref_can_still_be_checked_out(tmp_path):
+    """`resolve_branch_commit_sha` returns a sha from `origin/<branch>`, which need not be
+    on any local branch of the mirror. A clone copies the object store wholesale, so the
+    sha is present; `switch -c` is what makes it reachable again."""
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    _init_mirror(remote)
+    _git(["checkout", "-b", "feature"], remote)
+    (remote / "feature.txt").write_text("x", encoding="utf-8")
+    _git(["add", "-A"], remote)
+    _git(["commit", "-m", "feature only"], remote)
+    feature_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(remote), capture_output=True,
+        encoding="utf-8", check=True,
+    ).stdout.strip()
+    _git(["checkout", "-"], remote)
+
+    mirror = tmp_path / "mirror"
+    clone_or_update_mirror(str(remote), mirror)
+    local_heads = subprocess.run(
+        ["git", "branch", "--format=%(refname:short)"], cwd=str(mirror),
+        capture_output=True, encoding="utf-8", check=True,
+    ).stdout.split()
+    assert "feature" not in local_heads, "precondition: the sha is only on origin/feature"
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    worktree = create_worktree(mirror, run_dir, feature_sha, "autofix/nexus/test-2")
+
+    assert current_commit_sha(worktree.path) == feature_sha
+
+
+def test_origin_points_at_the_real_remote_not_the_mirror(tmp_path):
+    """`publish` pushes to `origin`. Left pointing at the mirror it would push into the
+    local cache — succeeding silently while shipping nothing."""
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    sha = _init_mirror(mirror)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    worktree = create_worktree(
+        mirror, run_dir, sha, "autofix/nexus/test-3", "https://github.com/o/r.git"
+    )
+
+    origin = subprocess.run(
+        ["git", "remote", "get-url", "origin"], cwd=str(worktree.path),
+        capture_output=True, encoding="utf-8", check=True,
+    ).stdout.strip()
+    assert origin == "https://github.com/o/r.git"
+
+
+def test_remove_worktree_returns_false_after_exhausting_retries(tmp_path):
+    # Stands in for the Windows case this retry loop exists for: a Gradle daemon or a
+    # file indexer still holding a handle, so every delete attempt leaves the directory
+    # in place. `time.sleep` is mocked so this doesn't really wait retries * delay.
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    stuck = tmp_path / "wt"
+    stuck.mkdir()
+    worktree = Worktree(path=stuck, branch="autofix/nexus/stuck")
+
+    with patch("nexus_autofix.repo.workspace.shutil.rmtree") as mock_rmtree, \
+            patch("nexus_autofix.repo.workspace.time.sleep") as mock_sleep:
+        removed = remove_worktree(mirror, worktree, retries=3, delay_seconds=2.0)
 
     assert removed is False
+    assert mock_rmtree.call_count == 3
     assert mock_sleep.call_count == 3
+
+
+def test_removing_an_already_gone_checkout_succeeds(tmp_path):
+    """Cleanup runs in a `finally`, so it can land after an earlier failure removed it."""
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    gone = Worktree(path=tmp_path / "does-not-exist", branch="autofix/nexus/gone")
+
+    assert remove_worktree(mirror, gone) is True
 
 
 def _init_remote(path: Path) -> str:

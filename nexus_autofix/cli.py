@@ -432,7 +432,7 @@ def perform_run(
                  f.remediation_type or "n/a")
 
     log.info("creating worktree on %s at %s", fix_branch, run_dir)
-    worktree = create_worktree(mirror_path, run_dir, commit_sha, fix_branch)
+    worktree = create_worktree(mirror_path, run_dir, commit_sha, fix_branch, repo_url)
 
     descriptor = read_descriptor(worktree.path / ".security-fix.yml")
     suppressed = unexpired_suppressions(descriptor, date.today())
@@ -699,7 +699,7 @@ def perform_discovery(
         iq_client, internal_id, violations, config.default_stage_id, config.min_threat_level
     )
 
-    worktree = create_worktree(mirror_path, run_dir, commit_sha, fix_branch)
+    worktree = create_worktree(mirror_path, run_dir, commit_sha, fix_branch, repo_url)
     try:
         strategies = trident_mod.parse_trident_build_yaml(
             worktree.path / ".trident" / "build.yaml"

@@ -72,6 +72,7 @@ current directory.
 | `check` | 1. Classifies the diff and **refuses** it if it does anything a dependency fix must not — disabled tests, an IQ waiver, a hand-edited lockfile, `--legacy-peer-deps`, a downgrade. 2. Runs the real **build**. 3. Runs the real **tests**. Records the verdict. | No |
 | `publish` | **Commits**, **pushes** the fix branch, then runs a **fresh IQ scan** to confirm the findings cleared. Prints a GitHub compare URL to open the PR from. Refuses without a passing `check`. Deletes the pushed branch if the rescan shows the findings are still there. | Yes |
 | `run` | All of the above in one command, invoking a coding agent for the editing step. | Yes (unless `--dry-run`) |
+| `remediate` | Asks Nexus IQ what version of one component clears the policy. For components that never reached the policy report — typically a transitive dependency whose artifact is quarantined, so the scan could not resolve it either. | No |
 | `gc` | Deletes stale `autofix/nexus/*` branches with no open PR. | Yes |
 
 **`check` verifies, `publish` ships.** `check` is more than the tests: the diff classification

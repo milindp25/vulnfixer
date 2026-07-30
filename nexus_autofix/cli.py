@@ -101,6 +101,59 @@ def purl_to_component_identifier(purl: str) -> dict:
     return {"format": purl_type, "coordinates": {"name": rest, "version": version}}
 
 
+def component_spec_to_identifier(spec: str) -> dict:
+    """Turn a component written by hand into the identifier the remediation API wants.
+
+    Accepts what a person or an agent naturally has in front of them when a build fails —
+    a Maven GAV from a stack trace, an npm name@version, or a purl:
+
+        io.netty:netty-codec-http:4.1.100.Final
+        pkg:maven/io.netty/netty-codec-http@4.1.100.Final
+        postcss@8.5.10
+        pkg:npm/postcss@8.5.10
+
+    The coordinate keys differ by format and getting them wrong is the most likely mistake:
+    Maven wants groupId/artifactId/version/extension, npm wants packageId/version. IQ
+    rejects the wrong set with "coordinates containing the following incorrect entries".
+    """
+    spec = spec.strip()
+    if spec.startswith("pkg:"):
+        return purl_to_component_identifier(spec)
+
+    parts = spec.split(":")
+    if len(parts) == 3:
+        group_id, artifact_id, version = parts
+        return {
+            "format": "maven",
+            "coordinates": {
+                "groupId": group_id, "artifactId": artifact_id,
+                "version": version, "extension": "jar",
+            },
+        }
+    if len(parts) == 4:
+        # group:artifact:version:extension, as printed by Gradle's dependency report.
+        group_id, artifact_id, version, extension = parts
+        return {
+            "format": "maven",
+            "coordinates": {
+                "groupId": group_id, "artifactId": artifact_id,
+                "version": version, "extension": extension,
+            },
+        }
+    if "@" in spec:
+        # npm, including scoped names where the leading @ is part of the package.
+        name, _, version = spec.rpartition("@")
+        if name:
+            return {"format": "npm", "coordinates": {"packageId": name, "version": version}}
+
+    raise click.ClickException(
+        f"could not read {spec!r} as a component. Use one of:\n"
+        "  maven   io.netty:netty-codec-http:4.1.100.Final\n"
+        "  npm     postcss@8.5.10\n"
+        "  purl    pkg:maven/io.netty/netty-codec-http@4.1.100.Final"
+    )
+
+
 def _finding_without_remediation(v, reason: str) -> Finding:
     """A Finding for a component we deliberately did not ask IQ to remediate.
 
@@ -1011,3 +1064,70 @@ def publish_command(run_id: str, dry_run: bool, open_pr: bool, verbose: bool):
 
     _agent_json({"ok": True, "pull_request_url": pull_request.url,
                  "pull_request_number": pull_request.number, "branch": fix_branch})
+
+
+@main.command("remediate")
+@click.argument("component")
+@click.option("--run-id", default=None, help="Use the application from an existing run.")
+@click.option("--app-id", default=None, help="IQ public application ID. Defaults to $NEXUSFIX_APP_ID.")
+@click.option("-v", "--verbose", is_flag=True, default=False)
+def remediate_command(component: str, run_id: str | None, app_id: str | None, verbose: bool):
+    """Ask Nexus IQ what version of COMPONENT clears the policy.
+
+    For components that never reached the policy report — a transitive dependency the scan
+    could not resolve because the artifact is quarantined, for instance. The build names it
+    in its 403 and this turns that name into IQ's own recommended version, so nobody has to
+    guess which version is safe.
+
+    COMPONENT can be a Maven GAV, an npm name@version, or a purl:
+
+        nexusfix remediate io.netty:netty-codec-http:4.1.100.Final
+        nexusfix remediate postcss@8.5.10
+        nexusfix remediate pkg:npm/%40scope/pkg@1.2.3
+    """
+    secrets = load_secrets()
+    identifier = component_spec_to_identifier(component)
+    current_version = (identifier.get("coordinates") or {}).get("version", "")
+
+    if run_id:
+        state = agent_api.load_run_state(secrets.workspace_root, run_id)
+        config = _config_for_run(state)
+        internal_id = state["internal_id"]
+        configure_logging(Path(state["run_dir"]) / "nexusfix.log", verbose=verbose)
+    else:
+        config = load_project_config(Path("config.yml"))
+        app_id = app_id or secrets.default_app_id
+        if not app_id:
+            raise click.ClickException(
+                "need --run-id, or --app-id (or NEXUSFIX_APP_ID in .env) — remediation is "
+                "evaluated against a specific application's policy set."
+            )
+        configure_logging(secrets.workspace_root / "runs" / "adhoc" / "nexusfix.log", verbose=verbose)
+        internal_id = HTTPIQClient(
+            secrets.iq_url, secrets.iq_username, secrets.iq_password
+        ).resolve_application_internal_id(app_id)
+
+    iq_client = HTTPIQClient(secrets.iq_url, secrets.iq_username, secrets.iq_password)
+    try:
+        remediation = iq_client.fetch_remediation(internal_id, identifier, config.default_stage_id)
+    except Exception as exc:
+        raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
+
+    chosen = remediation_mod.select_target(remediation, component, current_version)
+    _agent_json({
+        "component": component,
+        "component_identifier": identifier,
+        "current_version": current_version,
+        "target_version": chosen.version if chosen else None,
+        "remediation_type": chosen.change_type if chosen else None,
+        # Everything IQ offered, so a caller can see what was rejected and why the chosen
+        # one won, rather than having to trust the selection.
+        "all_offers": [
+            {"type": vc.change_type, "version": vc.version} for vc in remediation.version_changes
+        ],
+        "message": (
+            f"Upgrade to {chosen.version}." if chosen else
+            "Nexus IQ offered no version newer than this one. It cannot be fixed by bumping "
+            "this component — bump whichever parent pulls it in, or escalate."
+        ),
+    })

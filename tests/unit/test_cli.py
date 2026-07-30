@@ -479,3 +479,65 @@ def test_publish_does_not_open_a_pr_by_default():
     assert option.is_flag is True
     assert option.default is False
     assert "open_pr" in {p.name for p in cli_mod.publish_command.params}
+
+
+# --------------------------------------------------------------------------------------
+# `remediate` exists for components that never reached the policy report — a transitive
+# dependency the scan could not resolve because the artifact is quarantined. The build
+# names it in its 403; this turns that name into IQ's own recommended version.
+# --------------------------------------------------------------------------------------
+
+
+def test_a_maven_gav_uses_maven_coordinate_keys():
+    # IQ rejects the wrong set with "coordinates containing the following incorrect
+    # entries: packageId" — that is the npm key, and it was the reported failure.
+    from nexus_autofix.cli import component_spec_to_identifier
+
+    identifier = component_spec_to_identifier("io.netty:netty-codec-http:4.1.100.Final")
+
+    assert identifier["format"] == "maven"
+    assert identifier["coordinates"] == {
+        "groupId": "io.netty", "artifactId": "netty-codec-http",
+        "version": "4.1.100.Final", "extension": "jar",
+    }
+    assert "packageId" not in identifier["coordinates"]
+
+
+def test_a_four_part_gav_keeps_its_extension():
+    # The form Gradle's dependency report prints.
+    from nexus_autofix.cli import component_spec_to_identifier
+
+    identifier = component_spec_to_identifier("io.netty:netty-codec-http:4.1.100.Final:pom")
+    assert identifier["coordinates"]["extension"] == "pom"
+
+
+def test_an_npm_spec_uses_npm_coordinate_keys():
+    from nexus_autofix.cli import component_spec_to_identifier
+
+    identifier = component_spec_to_identifier("postcss@8.5.10")
+    assert identifier == {"format": "npm", "coordinates": {"packageId": "postcss", "version": "8.5.10"}}
+
+
+def test_a_scoped_npm_name_keeps_its_leading_at():
+    # rpartition, not split: the leading @ is part of the name, not the version separator.
+    from nexus_autofix.cli import component_spec_to_identifier
+
+    identifier = component_spec_to_identifier("@charlietango/use-focus-trap@1.4.0")
+    assert identifier["coordinates"]["packageId"] == "@charlietango/use-focus-trap"
+    assert identifier["coordinates"]["version"] == "1.4.0"
+
+
+def test_a_purl_is_accepted_too():
+    from nexus_autofix.cli import component_spec_to_identifier
+
+    identifier = component_spec_to_identifier("pkg:maven/io.netty/netty-codec-http@4.1.100.Final")
+    assert identifier["coordinates"]["artifactId"] == "netty-codec-http"
+
+
+def test_an_unreadable_spec_shows_the_accepted_forms():
+    import click
+
+    from nexus_autofix.cli import component_spec_to_identifier
+
+    with pytest.raises(click.ClickException, match="io.netty:netty-codec-http"):
+        component_spec_to_identifier("just-a-name")

@@ -120,6 +120,45 @@ This classifies the diff, then runs the real build and tests. It prints:
 Repeat step 2 and step 3 until `ok` is true. If you cannot get there after a few
 attempts, stop and report what failed — do not force it through.
 
+## If the build fails on a 403 / quarantined artifact
+
+A dependency can be **quarantined** in the repository manager, in which case downloading it
+returns `403` with text like *"Requested item is quarantined"*. The build fails on it even
+though it never appeared in `findings` — the scan could not download it either, so Nexus IQ
+never saw it.
+
+The full build output is in `nexusfix.log` in this directory. Read it there; do not re-run
+the build to see it.
+
+1. Take the exact component from the 403, e.g. `io.netty:netty-resolver-dns:4.1.100.Final`.
+2. Ask Nexus IQ what version clears the policy — **do not choose a version yourself**:
+
+   ```
+   nexusfix remediate io.netty:netty-resolver-dns:4.1.100.Final --run-id <run_id>
+   ```
+
+   Use the `target_version` it returns. If it returns `null`, the component cannot be fixed
+   by bumping it — report that and stop.
+3. Quarantined components are usually transitive, so the manifest will not name them. Find
+   the parent that pulls it in:
+
+   ```
+   ./gradlew dependencies --configuration runtimeClasspath
+   ./mvnw dependency:tree -Dverbose -Dincludes=io.netty
+   ```
+
+   Bump **that parent** to a version whose dependency is at or past the target.
+4. Run `check` again.
+
+**You must never work around a quarantine.** Do not add `mavenCentral()`, jcenter, or any
+other repository; do not use `--offline`; do not exclude the dependency; do not pin it to a
+version the repository refuses to serve. Quarantine is a security control. Finding a clean
+version that the repository will serve is the fix; evading the block is not, and `check`
+will refuse the diff if you try.
+
+If no version works, say so and stop. Someone has to release the quarantine in Nexus
+Firewall, and that is not something you can or should do.
+
 ## Step 4 — Publish
 
 Again from `run_commands_from`, not from the run directory or `wt/`.

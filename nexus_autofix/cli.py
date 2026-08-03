@@ -31,6 +31,7 @@ from nexus_autofix.publish import branch as branch_mod
 from nexus_autofix.publish.gate import present_pre_pr_gate
 from nexus_autofix.publish.pr import open_pull_request
 from nexus_autofix.repo import trident as trident_mod
+from nexus_autofix.repo import usage as usage_mod
 from nexus_autofix.repo.descriptor import read_descriptor, unexpired_suppressions
 from nexus_autofix.repo.workspace import (
     clone_or_update_mirror,
@@ -1395,5 +1396,88 @@ def remediate_command(component: str, run_id: str | None, app_id: str | None, ve
             f"Upgrade to {chosen.version}." if chosen else
             "Nexus IQ offered no version newer than this one. It cannot be fixed by bumping "
             "this component — bump whichever parent pulls it in, or escalate."
+        ),
+    })
+
+
+@main.command("usage")
+@click.argument("component")
+@click.option("--run-id", required=True, help="The run_id printed by `nexusfix discover`.")
+@click.option("-v", "--verbose", is_flag=True, default=False)
+@logs_failures("usage")
+def usage_command(component: str, run_id: str, verbose: bool):
+    """Show where COMPONENT is used, and what options exist when IQ cannot fix it.
+
+    For a finding IQ offers no upgrade for. Upgrading being off the table, the remaining
+    options are to bump whichever parent pulls it in, to replace it, or to drop it — and
+    choosing needs evidence this gathers: whether the manifest declares it, whether
+    anything references it, and whether IQ can clear the violation by moving a parent.
+
+    Reports evidence and changes nothing. See `nexus_autofix/repo/usage.py` for why the
+    "is it unused" half of the question cannot be answered honestly by static analysis.
+    """
+    secrets = load_secrets()
+    try:
+        state = agent_api.load_run_state(secrets.workspace_root, run_id)
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    config = _config_for_run(state)
+    run_dir = Path(state["run_dir"])
+    configure_logging(run_dir / "nexusfix.log", verbose=verbose)
+
+    worktree = Path(state["worktree"])
+    ecosystem = state["ecosystem"]
+    evidence = usage_mod.find_usage(component, worktree, ecosystem)
+
+    finding = next(
+        (f for f in state.get("findings", []) if f.get("component") == component), None
+    )
+    parents = list((finding or {}).get("pulled_in_by") or [])
+
+    # The parent lookup is the part with actual authority behind it. Everything above is
+    # a text search over the repository; this is IQ answering whether moving the parent
+    # clears the violation, which is the same kind of answer as a direct remediation.
+    parent_options = []
+    if parents:
+        iq_client = HTTPIQClient(secrets.iq_url, secrets.iq_username, secrets.iq_password)
+        for purl in parents:
+            identifier = purl_to_component_identifier(purl)
+            try:
+                remediation = iq_client.fetch_remediation(
+                    state["internal_id"], identifier, config.stage_id_for(state["app_id"])
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad parent must not hide the rest
+                log.error("remediation lookup failed for parent %s: %s", purl, exc)
+                parent_option = {"parent_purl": purl, "error": f"{type(exc).__name__}: {exc}"}
+            else:
+                chosen = remediation_mod.select_target(
+                    remediation, purl, purl_version(purl)
+                )
+                parent_option = {
+                    "parent_purl": purl,
+                    "parent_current_version": purl_version(purl),
+                    "parent_target_version": chosen.version if chosen else None,
+                    "remediation_type": chosen.change_type if chosen else None,
+                }
+            parent_options.append(parent_option)
+
+    _agent_json({
+        "component": component,
+        "ecosystem": ecosystem,
+        "declared_in_manifest": [asdict(r) for r in evidence.declared_in_manifest],
+        "referenced_in_source": [asdict(r) for r in evidence.referenced_in_source],
+        "referenced_in_config": [asdict(r) for r in evidence.referenced_in_config],
+        "files_searched": evidence.files_searched,
+        "summary": evidence.summary,
+        "pulled_in_by": parents,
+        "parent_options": parent_options,
+        # Stated in the machine-readable output too, so an agent reading only stdout
+        # cannot take a bare "no references found" as permission to delete something.
+        "removal_is_not_automated": (
+            "This is evidence, not a verdict. No reference found does NOT mean unused: a "
+            "dependency can be loaded by name at runtime, named in a config file this does "
+            "not parse, or used only on a path the tests never take. Removing a dependency "
+            "is a decision for someone who knows the service; nexusfix will not do it and "
+            "a passing build does not license it."
         ),
     })

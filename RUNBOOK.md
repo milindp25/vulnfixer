@@ -207,6 +207,33 @@ blindly.
 
 ---
 
+## If a finding has no fix available
+
+An entry with `"actionable": false` and a reason like *"IQ offers no remediation version"*
+cannot be fixed by upgrading it. **Do not invent one** — do not pick a version IQ did not
+offer, and do not delete the dependency.
+
+To see what the options actually are:
+
+```
+nexusfix usage <component> --run-id <run_id>
+```
+
+It reports where the component is declared and referenced, and — the useful part — asks
+Nexus IQ whether bumping whichever **parent** pulls it in would clear the violation. A
+`parent_target_version` in the output is a real fix with IQ behind it: bump that parent
+instead, then run `check`.
+
+If there is no parent fix either, report it and stop. In particular:
+
+- **"no reference found" does not mean unused.** A dependency can be loaded by name at
+  runtime, named in a config file the search does not parse, or used only on a path the
+  tests never take. A transitive dependency is used by its *parent*, not by this code, so
+  finding no reference to it is the expected result and says nothing about safety.
+- **Never remove a dependency to clear a finding.** Tests passing does not license it —
+  that proves the paths the tests take still work, which is a much weaker claim. This is a
+  decision for someone who knows the service. Report it as a suggestion for a human.
+
 ## If you get stuck
 
 Stop and report rather than trying more variations. Point the user at

@@ -800,3 +800,75 @@ def test_a_report_with_no_components_at_all_is_not_an_error():
     session.get.return_value = _status_response(_live_report([]))
     client = HTTPIQClient("https://iq.example.com", "user", "pass", session=session)
     assert client.fetch_policy_report("demo", "rep-1") == []
+
+
+def _report(components):
+    return {"components": components}
+
+
+def _component(purl, direct):
+    data = {} if direct is None else {"directDependency": direct}
+    return {
+        "packageUrl": purl,
+        "componentIdentifier": {"format": "maven", "coordinates": {"version": "1.0"}},
+        "dependencyData": data,
+        "violations": [{"policyName": "Security-High", "policyThreatLevel": 9}],
+    }
+
+
+def test_dependency_coverage_counts_direct_transitive_and_unmarked():
+    from nexus_autofix.iq.client import _dependency_coverage
+
+    counted = _dependency_coverage([
+        _component("pkg:maven/a/a@1", True),
+        _component("pkg:maven/b/b@1", False),
+        _component("pkg:maven/c/c@1", False),
+        _component("pkg:maven/d/d@1", None),
+        "not a dict",
+    ])
+    assert counted == (1, 2, 1)
+
+
+def test_a_report_with_no_transitives_at_all_warns_loudly(caplog):
+    """Otherwise a manifest-only scan reads as a clean run that happened to find little.
+
+    It cannot report a vulnerable transitive dependency at all, so "no findings" is a far
+    weaker claim than it looks — and the run says nothing about the difference.
+    """
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    from nexus_autofix.iq.client import HTTPIQClient
+
+    client = HTTPIQClient("https://iq.example.com", "u", "p")
+    response = MagicMock()
+    response.json.return_value = _report([
+        _component("pkg:maven/a/a@1", True),
+        _component("pkg:maven/b/b@1", True),
+    ])
+
+    with caplog.at_level(logging.WARNING, logger="nexus_autofix.iq.client"), \
+            patch.object(client, "_get", return_value=response):
+        client.fetch_policy_report("app", "report-1")
+
+    assert "not one component in this report is marked transitive" in caplog.text
+
+
+def test_a_report_containing_transitives_does_not_warn(caplog):
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    from nexus_autofix.iq.client import HTTPIQClient
+
+    client = HTTPIQClient("https://iq.example.com", "u", "p")
+    response = MagicMock()
+    response.json.return_value = _report([
+        _component("pkg:maven/a/a@1", True),
+        _component("pkg:maven/b/b@1", False),
+    ])
+
+    with caplog.at_level(logging.WARNING, logger="nexus_autofix.iq.client"), \
+            patch.object(client, "_get", return_value=response):
+        client.fetch_policy_report("app", "report-1")
+
+    assert "marked transitive" not in caplog.text

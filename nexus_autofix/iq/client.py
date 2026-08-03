@@ -298,6 +298,30 @@ def _worst_violation_for_component(component: dict) -> PolicyViolation | None:
     )
 
 
+def _dependency_coverage(components: list) -> tuple[int, int, int]:
+    """Count how many components IQ marked direct / transitive / neither.
+
+    Whether the scan resolved the dependency *tree* or only read the manifest is the
+    single biggest determinant of what a run can possibly fix, and nothing else in the
+    response says which happened. This is the closest thing to a direct measurement:
+    a real tree resolution produces many transitive components, and a manifest-only
+    read produces almost none.
+    """
+    direct = transitive = unknown = 0
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        data = component.get("dependencyData")
+        flag = data.get("directDependency") if isinstance(data, dict) else None
+        if flag is True:
+            direct += 1
+        elif flag is False:
+            transitive += 1
+        else:
+            unknown += 1
+    return direct, transitive, unknown
+
+
 def _extract_error_message(body: dict) -> str:
     for name in _ERROR_MESSAGE_FIELDS:
         value = body.get(name)
@@ -481,6 +505,26 @@ class HTTPIQClient:
             headers={"Accept": "application/json"},
         )
         components = _components_from_policy_report(resp.json())
+        direct, transitive, unknown = _dependency_coverage(components)
+        log.info(
+            "IQ scanned %d component(s): %d direct, %d transitive, %d unmarked",
+            len(components), direct, transitive, unknown,
+        )
+        if components and transitive == 0:
+            # Loud, because the run will otherwise look like a clean success that simply
+            # found little. A scan that never resolved the tree cannot report a vulnerable
+            # transitive dependency, so "no findings" means "nothing found in the manifest"
+            # — a much weaker claim than it appears, and not one this tool should make
+            # silently. A lockfile (package-lock.json, yarn.lock) enumerates the tree, so
+            # IQ sees transitives without resolving anything; a bare pom.xml or
+            # build.gradle does not, and resolution can also be blocked by a quarantine.
+            log.warning(
+                "not one component in this report is marked transitive. IQ has very likely "
+                "analysed the manifest without resolving the dependency tree, so only "
+                "DIRECT dependencies are covered and a vulnerable transitive cannot appear "
+                "in the findings at all. Check that a lockfile is committed for this repo, "
+                "and that nothing in the build is blocking dependency resolution."
+            )
         # Per component, so one oddly-shaped entry among hundreds cannot end the run. A
         # single unexpected null used to raise out of here as a bare
         # "AttributeError: 'NoneType' object has no attribute 'get'" with no indication of

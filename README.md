@@ -14,14 +14,29 @@ about what it did is believed — changed files are read from `git status`.
 
 Python 3.11+ and `git` already authenticated for the repos you'll point it at.
 
+### macOS / Linux
+
 ```bash
-python -m venv .venv && .venv/bin/pip install -e ".[dev]"
+python3 -m venv .venv
 ```
 
-Windows: `py -m venv .venv`, then `.venv\Scripts\pip install -e ".[dev]"`. Commands below
-say `nexusfix`; on Windows that's `.venv\Scripts\nexusfix.exe`.
+```bash
+.venv/bin/pip install -e ".[dev]"
+```
 
-Copy `.env.example` to `.env`:
+### Windows (PowerShell)
+
+```powershell
+py -m venv .venv
+```
+
+```powershell
+.venv\Scripts\pip install -e ".[dev]"
+```
+
+### Then, on both
+
+Copy `.env.example` to `.env` and fill it in:
 
 ```bash
 NEXUSFIX_IQ_URL=https://iq.corp.example.com
@@ -29,7 +44,17 @@ NEXUSFIX_IQ_USERNAME=<IQ user token ID>
 NEXUSFIX_IQ_PASSWORD=<IQ user token secret>
 NEXUSFIX_APP_ID=<the app you usually work on>     # optional, saves --app-id
 NEXUSFIX_BRANCH=main                              # optional, saves --branch
-NEXUSFIX_WORKSPACE_ROOT=/path/to/nfx              # optional, defaults to ~/nfx
+NEXUSFIX_WORKSPACE_ROOT=<path>                    # optional; default ~/nfx, see below
+```
+
+**Windows paths in `.env`: don't put them in double quotes.** Unquoted is fine, but inside
+double quotes the escape sequences are processed, so `"C:\Users\you\nfx"` reads back with
+the `\n` turned into a newline. Verified, not guessed:
+
+```bash
+NEXUSFIX_WORKSPACE_ROOT=C:\Users\you\nfx     # fine
+NEXUSFIX_WORKSPACE_ROOT=C:/Users/you/nfx     # also fine, and immune to the above
+NEXUSFIX_WORKSPACE_ROOT="C:\Users\you\nfx"   # BROKEN — \n becomes a newline
 ```
 
 And `config.yml`, mapping each IQ **public application ID** to its repo:
@@ -53,39 +78,81 @@ stops rather than guessing how to build.
 
 ## Using it
 
+`nexusfix` isn't on your `PATH` unless the virtualenv is activated. Everywhere below it
+means:
+
+| | Activate the venv first | Or call it directly |
+|---|---|---|
+| **macOS / Linux** | `source .venv/bin/activate` | `.venv/bin/nexusfix` |
+| **Windows** | `.venv\Scripts\activate` | `.venv\Scripts\nexusfix.exe` |
+
+Run every command from the directory holding `config.yml` and `.env`. Not from the run
+directory, and not from `wt/`.
+
 **1. Discover.** The only step that talks to Nexus IQ.
 
+macOS / Linux:
+
 ```bash
-nexusfix discover
+.venv/bin/nexusfix discover
+```
+
+Windows:
+
+```powershell
+.venv\Scripts\nexusfix.exe discover
 ```
 
 It scans the branch, works out each vulnerable component's target version, clones the repo
-into a run directory, and writes `run.json`. Nothing is modified.
+into a run directory, and writes `run.json`. Nothing is modified. It prints the `run_id` —
+you need it for every command after this.
 
 **2. Open the run directory** — not this repo:
+
+macOS / Linux:
 
 ```bash
 code ~/nfx/runs/<run-id>
 ```
 
+Windows:
+
+```powershell
+code $env:USERPROFILE\nfx\runs\<run-id>
+```
+
 It holds `RUNBOOK.md`, `run.json`, `nexusfix.log`, and `wt/` — the checkout to edit.
+(`discover` prints the full path, so you can copy it from there instead.)
 
 **3. In Copilot Chat, agent mode:**
 
 > Read RUNBOOK.md and follow it. The run_id is `<paste it>`.
 
 The agent reads `run.json` for the exact version changes and edits `wt/`. It never talks to
-Nexus IQ.
+Nexus IQ. `run.json` records `nexusfix_executable` — the exact path this run was started
+with — so the agent doesn't have to work out the platform difference itself.
 
 **4. Verify and publish** — either the agent runs these, or you do, from your config
 directory (not from `wt/`):
 
+macOS / Linux:
+
 ```bash
-nexusfix check --run-id <run-id>
+.venv/bin/nexusfix check --run-id <run-id>
 ```
 
 ```bash
-nexusfix publish --run-id <run-id>
+.venv/bin/nexusfix publish --run-id <run-id>
+```
+
+Windows:
+
+```powershell
+.venv\Scripts\nexusfix.exe check --run-id <run-id>
+```
+
+```powershell
+.venv\Scripts\nexusfix.exe publish --run-id <run-id>
 ```
 
 `check` classifies the diff, then builds, then tests. `publish` commits, pushes, and
@@ -178,7 +245,9 @@ findings when a build is broken.
 
 ## When something fails
 
-`<workspace_root>/runs/<run-id>/nexusfix.log` is the file worth sending. It has what the
+`<workspace_root>/runs/<run-id>/nexusfix.log` is the file worth sending — that's
+`~/nfx/runs/<run-id>/nexusfix.log` on macOS, `%USERPROFILE%\nfx\runs\<run-id>\nexusfix.log`
+on Windows unless you set `NEXUSFIX_WORKSPACE_ROOT`. It has what the
 console doesn't: full IQ request/response bodies, the **complete** build and test output
 (not the tail), and the stack trace of any crash. Safe to share — credentials are never
 logged. `-v` on any command also puts the detail on the console.
@@ -217,6 +286,14 @@ live response.
 
 ## Tests
 
+macOS / Linux:
+
 ```bash
 .venv/bin/python -m pytest -q
+```
+
+Windows:
+
+```powershell
+.venv\Scripts\python -m pytest -q
 ```

@@ -748,35 +748,48 @@ def _scan_for_report(
         )
         return iq_client.poll_evaluation(status_url, config.poll_timeout_seconds)
 
-    build_cmd = commands_mod.BUILD_COMMANDS[ecosystem](worktree_path)
-    env = dict(os.environ)
-    for version, table, resolve in (
-        (java_version, config.java_toolchains, toolchain_mod.resolve_java_env),
-        (node_version, config.node_toolchains, toolchain_mod.resolve_node_env),
-    ):
-        if version:
-            try:
-                env = resolve(version, table, env).env
-            except toolchain_mod.MissingToolchainError as exc:
-                raise click.ClickException(f"toolchain unavailable: {exc}") from exc
+    if ecosystem in cli_scan_mod.BUILD_BEFORE_SCAN:
+        env = dict(os.environ)
+        for version, table, resolve in (
+            (java_version, config.java_toolchains, toolchain_mod.resolve_java_env),
+            (node_version, config.node_toolchains, toolchain_mod.resolve_node_env),
+        ):
+            if version:
+                try:
+                    env = resolve(version, table, env).env
+                except toolchain_mod.MissingToolchainError as exc:
+                    raise click.ClickException(f"toolchain unavailable: {exc}") from exc
 
-    log.info("%s scan: building first, because the IQ CLI scans build output", label)
-    build = commands_mod.run_command(
-        build_cmd, worktree_path, env, config.subprocess_timeout_seconds
-    )
-    if not build.success:
-        # Not survivable, and saying so plainly beats scanning an empty directory and
-        # reporting an application with no components as an application with no problems.
-        raise click.ClickException(
-            f"the build failed, so there are no artifacts to scan: {' '.join(build_cmd)}\n"
-            f"{build.tail()}\n"
-            "A CLI scan reads build output. Fix the build, or unset iq_cli_jar in "
-            "config.yml to fall back to the source-control scan."
+        build_cmd = commands_mod.BUILD_COMMANDS[ecosystem](worktree_path)
+        log.info(
+            "%s scan: building first — a %s project has no components until a build "
+            "produces them", label, ecosystem,
+        )
+        build = commands_mod.run_command(
+            build_cmd, worktree_path, env, config.subprocess_timeout_seconds
+        )
+        if not build.success:
+            # Not survivable, and saying so plainly beats scanning an empty directory and
+            # reporting an application with no components as one with no problems.
+            raise click.ClickException(
+                f"the build failed, so there are no artifacts to scan: {' '.join(build_cmd)}\n"
+                f"{build.tail()}\n"
+                "Fix the build, or set NEXUSFIX_SCAN_METHOD=source-control to fall back to "
+                "the source-control scan."
+            )
+    else:
+        log.info(
+            "%s scan: no build needed — a %s project's lockfile already pins the whole "
+            "resolved tree, which is what the CLI reads", label, ecosystem,
         )
 
-    scan_target = (
-        worktree_path / config.iq_cli_scan_target
-        if config.iq_cli_scan_target else worktree_path
+    if config.iq_cli_scan_target:
+        scan_targets = [worktree_path / t for t in config.iq_cli_scan_target]
+    else:
+        scan_targets = cli_scan_mod.default_scan_targets(ecosystem, worktree_path)
+    log.info(
+        "%s scan targets: %s", label,
+        ", ".join(str(t.relative_to(worktree_path)) for t in scan_targets) or "(none)",
     )
     # Default location, so setting only NEXUSFIX_IQ_CLI_URL is enough to get going: there
     # is then no path to keep in step across machines, and the jar is fetched once.
@@ -789,7 +802,7 @@ def _scan_for_report(
     )
     result = cli_scan_mod.run_cli_scan(
         jar_path=jar_path,
-        scan_target=scan_target,
+        scan_targets=scan_targets,
         app_id=app_id,
         iq_url=secrets.iq_url,
         username=secrets.iq_username,

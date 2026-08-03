@@ -208,22 +208,26 @@ def test_every_env_backed_project_setting_is_readable_from_a_dotenv_file(tmp_pat
         "NEXUSFIX_IQ_CLI_JAR": ("iq_cli_jar", "/from/env.jar"),
         "NEXUSFIX_IQ_CLI_URL": ("iq_cli_download_url", "https://env/iq.jar"),
         "NEXUSFIX_IQ_CLI_SHA256": ("iq_cli_sha256", "abc123"),
-        "NEXUSFIX_IQ_CLI_SCAN_TARGET": ("iq_cli_scan_target", "build"),
+        # Normalised to a tuple: the CLI takes several targets, and an env var can
+        # only express that as a comma-separated string.
+        "NEXUSFIX_IQ_CLI_SCAN_TARGET": ("iq_cli_scan_target", "build", ("build",)),
         "NEXUSFIX_SCAN_METHOD": ("scan_method", "iq-cli"),
     }
     for var in env_to_field:
         monkeypatch.delenv(var, raising=False)
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(
-        "".join(f"{var}={value}\n" for var, (_, value) in env_to_field.items()),
+        "".join(f"{var}={spec[1]}\n" for var, spec in env_to_field.items()),
         encoding="utf-8",
     )
     (tmp_path / "config.yml").write_text("repos: {}\n", encoding="utf-8")
 
     config = load_project_config(tmp_path / "config.yml")
 
-    for var, (field, value) in env_to_field.items():
-        assert getattr(config, field) == value, f"{var} did not reach {field}"
+    for var, spec in env_to_field.items():
+        field, written = spec[0], spec[1]
+        expected = spec[2] if len(spec) > 2 else written
+        assert getattr(config, field) == expected, f"{var} did not reach {field}"
 
 
 def test_a_shell_variable_still_beats_the_env_file(tmp_path, monkeypatch):
@@ -235,3 +239,42 @@ def test_a_shell_variable_still_beats_the_env_file(tmp_path, monkeypatch):
     (tmp_path / "config.yml").write_text("repos: {}\n", encoding="utf-8")
 
     assert load_project_config(tmp_path / "config.yml").scan_method == "source-control"
+
+
+def test_a_comma_separated_scan_target_becomes_several_targets(tmp_path, monkeypatch):
+    """The usual Node invocation passes the lockfile AND package.json, and an environment
+    variable can only express a list as a delimited string."""
+    from nexus_autofix.config import load_project_config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NEXUSFIX_IQ_CLI_SCAN_TARGET", "yarn.lock, package.json")
+    (tmp_path / "config.yml").write_text("repos: {}\n", encoding="utf-8")
+
+    config = load_project_config(tmp_path / "config.yml")
+
+    assert config.iq_cli_scan_target == ("yarn.lock", "package.json")
+
+
+def test_a_yaml_list_scan_target_is_read_as_a_list(tmp_path, monkeypatch):
+    from nexus_autofix.config import load_project_config
+
+    monkeypatch.delenv("NEXUSFIX_IQ_CLI_SCAN_TARGET", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yml").write_text(
+        "repos: {}\niq_cli_scan_target:\n  - yarn.lock\n  - package.json\n", encoding="utf-8"
+    )
+
+    config = load_project_config(tmp_path / "config.yml")
+
+    assert config.iq_cli_scan_target == ("yarn.lock", "package.json")
+
+
+def test_an_unset_scan_target_defers_to_the_ecosystem(tmp_path, monkeypatch):
+    """No single path is right for both Java and Node, so the default is 'work it out'."""
+    from nexus_autofix.config import load_project_config
+
+    monkeypatch.delenv("NEXUSFIX_IQ_CLI_SCAN_TARGET", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yml").write_text("repos: {}\n", encoding="utf-8")
+
+    assert load_project_config(tmp_path / "config.yml").iq_cli_scan_target == ()

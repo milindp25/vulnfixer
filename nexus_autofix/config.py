@@ -54,10 +54,11 @@ class ProjectConfig:
     #: Expected sha256 of the jar. Optional, and worth setting: the jar is executed with
     #: your IQ credentials on its command line.
     iq_cli_sha256: str = ""
-    #: Directory the CLI scans, relative to the checkout. Empty means the whole checkout,
-    #: which is what the CLI documentation suggests and what finds artifacts wherever a
-    #: multi-module build put them.
-    iq_cli_scan_target: str = ""
+    #: Path(s) the CLI scans, relative to the checkout. Empty means "work it out from the
+    #: ecosystem", which is almost always what you want: Java needs a build output
+    #: directory and Node needs a lockfile, so no single value is right for both. A list,
+    #: because the usual Node invocation passes the lockfile AND package.json.
+    iq_cli_scan_target: tuple[str, ...] = ()
     java_executable: str = "java"
     #: "iq-cli", "source-control", or "" to decide from whether a jar/URL is configured.
     scan_method: str = ""
@@ -130,6 +131,19 @@ def load_secrets(env_file: Path | None = None) -> Secrets:
     )
 
 
+def _scan_targets(value) -> tuple[str, ...]:
+    """Normalise a scan target setting to a tuple of paths.
+
+    Accepts a YAML list, a comma-separated string (the only thing an environment variable
+    can express), or a single path.
+    """
+    if not value:
+        return ()
+    if isinstance(value, (list, tuple)):
+        return tuple(str(v).strip() for v in value if str(v).strip())
+    return tuple(part.strip() for part in str(value).split(",") if part.strip())
+
+
 def load_project_config(path: Path) -> ProjectConfig:
     # Before reading anything, because several settings below fall back to os.environ and
     # every caller loads this file before it loads secrets. See `load_env_files`.
@@ -155,8 +169,8 @@ def load_project_config(path: Path) -> ProjectConfig:
         iq_cli_sha256=(
             os.environ.get("NEXUSFIX_IQ_CLI_SHA256") or str(data.get("iq_cli_sha256") or "")
         ),
-        iq_cli_scan_target=(
-            os.environ.get("NEXUSFIX_IQ_CLI_SCAN_TARGET") or str(data.get("iq_cli_scan_target") or "")
+        iq_cli_scan_target=_scan_targets(
+            os.environ.get("NEXUSFIX_IQ_CLI_SCAN_TARGET") or data.get("iq_cli_scan_target")
         ),
         java_executable=str(data.get("java_executable") or "java"),
         scan_method=os.environ.get("NEXUSFIX_SCAN_METHOD") or str(data.get("scan_method") or ""),

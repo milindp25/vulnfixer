@@ -29,6 +29,56 @@ log = logging.getLogger(__name__)
 
 RESULT_FILENAME = "iq-scan-result.json"
 
+#: Ecosystems whose components only exist as built artifacts. A jar has to be produced
+#: before it can be fingerprinted, so these are built before the scan.
+#:
+#: Node is deliberately absent. `yarn.lock` and `package-lock.json` already pin the entire
+#: resolved tree, so the CLI reads the whole dependency graph straight out of the
+#: repository — there is nothing a build would add. Installing first would cost minutes
+#: per run and change nothing about the result.
+BUILD_BEFORE_SCAN = frozenset({"gradle", "maven"})
+
+#: Conventional build output per ecosystem, tried in order. The first that exists wins;
+#: if none do, the whole checkout is scanned, which still finds artifacts wherever a
+#: multi-module build put them.
+_OUTPUT_DIRS: dict[str, tuple[str, ...]] = {
+    "gradle": ("build",),
+    "maven": ("target",),
+}
+
+#: What to hand the CLI for a Node project, in preference order. Lockfile first: it is the
+#: pinned resolved tree, which is the whole point. `package.json` alone lists ranges, so a
+#: scan of it can only report what was declared, not what is installed.
+_NODE_MANIFESTS: dict[str, tuple[str, ...]] = {
+    "yarn": ("yarn.lock", "package.json"),
+    "npm": ("package-lock.json", "npm-shrinkwrap.json", "package.json"),
+    "pnpm": ("pnpm-lock.yaml", "package.json"),
+}
+
+
+def default_scan_targets(ecosystem: str, checkout: Path) -> list[Path]:
+    """What to point the CLI at for this ecosystem, when nothing is configured.
+
+    Java and Node need genuinely different things, which a single configured path cannot
+    express: Java has no components until a build produces jars, while Node has all of
+    them written down in a lockfile and none of them in a build directory. Pointing a
+    Node repo at `build/` finds nothing and reports an application with no dependencies.
+    """
+    if ecosystem in _NODE_MANIFESTS:
+        found = [
+            checkout / name for name in _NODE_MANIFESTS[ecosystem]
+            if (checkout / name).is_file()
+        ]
+        # Both the lockfile and package.json when both are present, mirroring the usual
+        # CI invocation: the lockfile carries the resolved tree, package.json names the
+        # application.
+        return found
+    for name in _OUTPUT_DIRS.get(ecosystem, ()):
+        candidate = checkout / name
+        if candidate.is_dir():
+            return [candidate]
+    return [checkout]
+
 
 class IQCLIScanError(RuntimeError):
     """The CLI did not produce a usable report — distinct from a failing policy."""
@@ -163,7 +213,7 @@ def _find_report_url(node: object) -> str | None:
 
 def run_cli_scan(
     jar_path: Path,
-    scan_target: Path,
+    scan_targets: list[Path],
     app_id: str,
     iq_url: str,
     username: str,
@@ -173,21 +223,34 @@ def run_cli_scan(
     timeout_seconds: int,
     java_executable: str = "java",
 ) -> CLIScanResult:
-    """Run the IQ CLI over `scan_target` and return the resulting report id.
+    """Run the IQ CLI over `scan_targets` and return the resulting report id.
 
-    Mirrors the invocation already in use in CI:
+    Mirrors the invocation already in use in CI, which takes one or more targets:
 
-        java -jar <jar> -i <app> -r <result.json> -s <iq-url> -a <user:pass> -t <stage> <target>
+        java -jar <jar> -i <app> -r <result.json> -s <url> -a <user:pass> -t <stage> <targets...>
+
+    Several targets is the normal case for Node — the lockfile carries the resolved tree
+    and package.json names the application, so both are passed.
     """
     if not jar_path.is_file():
         raise IQCLIScanError(
             f"Nexus IQ CLI jar not found at {jar_path}. Set `iq_cli_jar` in config.yml to "
             "the jar your pipeline uses."
         )
-    if not scan_target.exists():
+    if not scan_targets:
         raise IQCLIScanError(
-            f"nothing to scan at {scan_target}. The CLI reads build output, so the "
-            "application has to be built before it can be scanned."
+            "no scan target was resolved for this repository. Set iq_cli_scan_target in "
+            "config.yml (or NEXUSFIX_IQ_CLI_SCAN_TARGET) to the path(s) the CLI should "
+            "read — a lockfile for Node, a build output directory for Java."
+        )
+    missing = [t for t in scan_targets if not t.exists()]
+    if missing:
+        raise IQCLIScanError(
+            "these scan targets do not exist: " + ", ".join(str(m) for m in missing) + "\n"
+            "  For Java this usually means the build produced no output. For Node the CLI "
+            "reads the LOCKFILE (yarn.lock / package-lock.json), not a build directory — "
+            "check iq_cli_scan_target is not pinned to a path that only makes sense for "
+            "one of the two."
         )
     result_file.parent.mkdir(parents=True, exist_ok=True)
     if result_file.exists():
@@ -201,7 +264,7 @@ def run_cli_scan(
         "-s", iq_url,
         "-a", f"{username}:{password}",
         "-t", stage_id,
-        str(scan_target),
+        *[str(target) for target in scan_targets],
     ]
     log.info("IQ CLI scan: %s", _redact(args))
     proc = subprocess.run(

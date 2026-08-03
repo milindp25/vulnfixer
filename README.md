@@ -144,7 +144,7 @@ NEXUSFIX_IQ_CLI_SHA256=<the sha256 it logged>
 | jar checksum | `NEXUSFIX_IQ_CLI_SHA256` | `iq_cli_sha256` | verified on download |
 | existing jar | `NEXUSFIX_IQ_CLI_JAR` | `iq_cli_jar` | use one you already have |
 | force a method | `NEXUSFIX_SCAN_METHOD` | `scan_method` | `iq-cli` or `source-control` |
-| scan subdirectory | `NEXUSFIX_IQ_CLI_SCAN_TARGET` | `iq_cli_scan_target` | defaults to the whole checkout |
+| scan target(s) | `NEXUSFIX_IQ_CLI_SCAN_TARGET` | `iq_cli_scan_target` | comma-separated / YAML list; defaults per ecosystem |
 
 Environment wins over `config.yml` — the latter is committed and shared, while a jar's
 location is per-machine. Configuring a jar or a URL is what turns the CLI scan on;
@@ -160,6 +160,21 @@ java -jar <jar> -i <app> -r <result.json> -s <iq-url> -a <user:pass> -t <stage> 
 **Which build folder?** The run's own clone — `<workspace_root>/runs/<run-id>/wt`.
 `discover` clones the repo there, builds *there*, and scans *there*. Your local working
 copy and the directory you run `nexusfix` from are never built or scanned.
+
+**What gets scanned depends on the ecosystem**, and you normally shouldn't set it by hand:
+
+| Ecosystem | Built first? | Scanned |
+|---|---|---|
+| Gradle | yes | `build/`, or the whole checkout if there's no `build/` |
+| Maven | yes | `target/`, or the whole checkout |
+| yarn | **no** | `yarn.lock` + `package.json` |
+| npm | **no** | `package-lock.json` (or `npm-shrinkwrap.json`) + `package.json` |
+| pnpm | **no** | `pnpm-lock.yaml` + `package.json` |
+
+Java has no components until a build makes jars to fingerprint. Node is the opposite: the
+lockfile already pins the whole resolved tree, so there is nothing an install would add and
+no build directory to look in. A single configured path can't be right for both — pointing
+a Node repo at `build/` finds nothing and reports an application with no dependencies.
 
 Three consequences worth knowing:
 

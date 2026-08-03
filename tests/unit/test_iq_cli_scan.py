@@ -41,7 +41,7 @@ def _run(tmp_path, result_body=None, returncode=0, write_result=True, **kwargs):
 
     with patch("nexus_autofix.iq.cli_scan.subprocess.run", side_effect=fake_run) as mock:
         result = run_cli_scan(
-            jar_path=_jar(tmp_path), scan_target=_target(tmp_path), app_id="demo",
+            jar_path=_jar(tmp_path), scan_targets=[_target(tmp_path)], app_id="demo",
             iq_url="https://iq.example.com", username="u", password="p",
             stage_id="build", result_file=result_file, timeout_seconds=60, **kwargs,
         )
@@ -106,7 +106,7 @@ def test_a_stale_result_file_is_not_read_as_this_runs_result(tmp_path):
     with patch("nexus_autofix.iq.cli_scan.subprocess.run", side_effect=fake_run), \
             pytest.raises(IQCLIScanError):
         run_cli_scan(
-            jar_path=_jar(tmp_path), scan_target=_target(tmp_path), app_id="demo",
+            jar_path=_jar(tmp_path), scan_targets=[_target(tmp_path)], app_id="demo",
             iq_url="https://iq", username="u", password="p", stage_id="build",
             result_file=result_file, timeout_seconds=60,
         )
@@ -115,18 +115,23 @@ def test_a_stale_result_file_is_not_read_as_this_runs_result(tmp_path):
 def test_an_unbuilt_target_says_so_rather_than_scanning_nothing(tmp_path):
     with pytest.raises(IQCLIScanError) as exc:
         run_cli_scan(
-            jar_path=_jar(tmp_path), scan_target=tmp_path / "build", app_id="demo",
+            jar_path=_jar(tmp_path), scan_targets=[tmp_path / "build"], app_id="demo",
             iq_url="https://iq", username="u", password="p", stage_id="build",
             result_file=tmp_path / "r.json", timeout_seconds=60,
         )
 
-    assert "has to be built" in str(exc.value)
+    assert "do not exist" in str(exc.value)
+    # The message has to cover both shapes of this mistake, because the live one was a
+    # Node repo pointed at `build/` — where the fix is not "build it" but "scan the
+    # lockfile instead".
+    assert "build produced no output" in str(exc.value)
+    assert "LOCKFILE" in str(exc.value)
 
 
 def test_a_missing_jar_names_the_config_key(tmp_path):
     with pytest.raises(IQCLIScanError) as exc:
         run_cli_scan(
-            jar_path=tmp_path / "absent.jar", scan_target=_target(tmp_path), app_id="demo",
+            jar_path=tmp_path / "absent.jar", scan_targets=[_target(tmp_path)], app_id="demo",
             iq_url="https://iq", username="u", password="p", stage_id="build",
             result_file=tmp_path / "r.json", timeout_seconds=60,
         )
@@ -282,3 +287,119 @@ def test_no_jar_and_no_url_names_both_ways_to_fix_it(tmp_path):
         ensure_jar(tmp_path / "iq.jar")
 
     assert "NEXUSFIX_IQ_CLI_URL" in str(exc.value)
+
+
+# --- per-ecosystem scan targets --------------------------------------------------------
+
+def _node_repo(tmp_path, *files):
+    for name in files:
+        (tmp_path / name).write_text("{}", encoding="utf-8")
+    return tmp_path
+
+
+def test_a_yarn_project_is_scanned_at_its_lockfile_and_manifest(tmp_path):
+    """The live failure: a Node repo pointed at `build/` finds nothing and reports an
+    application with no dependencies at all."""
+    from nexus_autofix.iq.cli_scan import default_scan_targets
+
+    _node_repo(tmp_path, "yarn.lock", "package.json")
+
+    targets = default_scan_targets("yarn", tmp_path)
+
+    assert [t.name for t in targets] == ["yarn.lock", "package.json"]
+
+
+def test_an_npm_project_prefers_its_lockfile(tmp_path):
+    from nexus_autofix.iq.cli_scan import default_scan_targets
+
+    _node_repo(tmp_path, "package-lock.json", "package.json")
+
+    assert [t.name for t in default_scan_targets("npm", tmp_path)] == [
+        "package-lock.json", "package.json"
+    ]
+
+
+def test_a_pnpm_project_uses_its_own_lockfile_name(tmp_path):
+    from nexus_autofix.iq.cli_scan import default_scan_targets
+
+    _node_repo(tmp_path, "pnpm-lock.yaml", "package.json")
+
+    assert [t.name for t in default_scan_targets("pnpm", tmp_path)] == [
+        "pnpm-lock.yaml", "package.json"
+    ]
+
+
+def test_a_node_project_without_a_lockfile_falls_back_to_the_manifest(tmp_path):
+    from nexus_autofix.iq.cli_scan import default_scan_targets
+
+    _node_repo(tmp_path, "package.json")
+
+    assert [t.name for t in default_scan_targets("npm", tmp_path)] == ["package.json"]
+
+
+def test_a_gradle_project_is_scanned_at_its_build_output(tmp_path):
+    from nexus_autofix.iq.cli_scan import default_scan_targets
+
+    (tmp_path / "build").mkdir()
+
+    assert [t.name for t in default_scan_targets("gradle", tmp_path)] == ["build"]
+
+
+def test_a_maven_project_is_scanned_at_target(tmp_path):
+    from nexus_autofix.iq.cli_scan import default_scan_targets
+
+    (tmp_path / "target").mkdir()
+
+    assert [t.name for t in default_scan_targets("maven", tmp_path)] == ["target"]
+
+
+def test_a_java_project_with_no_conventional_output_dir_scans_the_whole_checkout(tmp_path):
+    """A multi-module build puts artifacts under each module, not at the root."""
+    from nexus_autofix.iq.cli_scan import default_scan_targets
+
+    assert default_scan_targets("gradle", tmp_path) == [tmp_path]
+
+
+def test_only_jvm_ecosystems_are_built_before_scanning():
+    """Node lockfiles already pin the resolved tree, so an install adds nothing and costs
+    minutes per run."""
+    from nexus_autofix.iq.cli_scan import BUILD_BEFORE_SCAN
+
+    assert "gradle" in BUILD_BEFORE_SCAN
+    assert "maven" in BUILD_BEFORE_SCAN
+    for ecosystem in ("npm", "yarn", "pnpm"):
+        assert ecosystem not in BUILD_BEFORE_SCAN
+
+
+def test_every_target_is_passed_to_the_cli_as_a_positional_argument(tmp_path):
+    lock = tmp_path / "yarn.lock"
+    manifest = tmp_path / "package.json"
+    lock.write_text("{}", encoding="utf-8")
+    manifest.write_text("{}", encoding="utf-8")
+    result_file = tmp_path / "result.json"
+
+    def fake_run(args, **_):
+        result_file.write_text(json.dumps(
+            {"reportDataUrl": "api/v2/applications/a/reports/r/raw"}), encoding="utf-8")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("nexus_autofix.iq.cli_scan.subprocess.run", side_effect=fake_run) as mock:
+        run_cli_scan(
+            jar_path=_jar(tmp_path), scan_targets=[lock, manifest], app_id="demo",
+            iq_url="https://iq", username="u", password="p", stage_id="build",
+            result_file=result_file, timeout_seconds=60,
+        )
+
+    args = mock.call_args.args[0]
+    assert args[-2:] == [str(lock), str(manifest)]
+
+
+def test_no_scan_target_at_all_is_an_error_rather_than_scanning_nothing(tmp_path):
+    with pytest.raises(IQCLIScanError) as exc:
+        run_cli_scan(
+            jar_path=_jar(tmp_path), scan_targets=[], app_id="demo", iq_url="https://iq",
+            username="u", password="p", stage_id="build",
+            result_file=tmp_path / "r.json", timeout_seconds=60,
+        )
+
+    assert "no scan target was resolved" in str(exc.value)

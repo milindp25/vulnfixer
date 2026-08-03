@@ -54,6 +54,10 @@ class PolicyViolation:
     parent_purls: list[str] = field(default_factory=list)
     #: `displayName`, e.g. "hasown : 2.0.2" — for humans (PR body), not for matching.
     display_name: str = ""
+    #: Which kind of waiver applies, when `is_waived` — an explicit waiver, an auto-waiver,
+    #: or a grandfathered legacy violation. IQ does not put the waiver's free-text comment
+    #: in the policy report, so this is the kind, not the author's stated reason.
+    waiver_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -247,10 +251,23 @@ def _worst_violation_for_component(component: dict) -> PolicyViolation | None:
             or violation.get("grandfathered")
         )
 
+    def waiver_kinds(violation: dict) -> list[str]:
+        kinds = []
+        if violation.get("waived"):
+            kinds.append("explicit waiver")
+        if violation.get("waivedWithAutoWaiver"):
+            kinds.append("auto-waiver")
+        if violation.get("grandfathered"):
+            kinds.append("grandfathered (violation predates the policy)")
+        return kinds
+
     considered = [v for v in violations if not is_waived(v)]
     all_waived = not considered
     if all_waived:
         considered = violations
+    waiver_reason = ", ".join(dict.fromkeys(
+        kind for v in violations for kind in waiver_kinds(v)
+    )) if all_waived else ""
 
     worst = max(considered, key=_threat_level_of)
     package_url = component.get("packageUrl") or ""
@@ -295,6 +312,7 @@ def _worst_violation_for_component(component: dict) -> PolicyViolation | None:
         is_direct=dependency_data.get("directDependency") is not False,
         parent_purls=parent_purls,
         display_name=str(component.get("displayName") or ""),
+        waiver_reason=waiver_reason,
     )
 
 

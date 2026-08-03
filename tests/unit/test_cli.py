@@ -212,7 +212,14 @@ def test_each_remediation_post_is_logged_with_its_component_and_body(caplog):
     assert "remediation lookup 1/2: axios (threat 9)" in caplog.text
     assert "remediation lookup 2/2: lodash (threat 10)" in caplog.text
     assert '{"componentIdentifier": {"format": "npm"' in caplog.text
-    assert "eol-thing" not in caplog.text, "skipped components must not appear as lookups"
+    # A skipped component costs no remediation POST. It does still get named in the
+    # skipped list, so this asserts the absence of a *lookup* rather than the absence of
+    # the name anywhere in the log.
+    assert not any(
+        "remediation lookup" in line and "eol-thing" in line
+        for line in caplog.text.splitlines()
+    ), "a skipped component must not cost a remediation POST"
+    assert "eol-thing" in caplog.text, "but it must still be accounted for as skipped"
     assert "2 POST(s) sent, 1 skipped" in caplog.text
 
 
@@ -602,3 +609,83 @@ def test_every_agent_facing_command_logs_its_failures():
             "reaches the console as a one-liner and leaves no traceback in nexusfix.log — "
             "which is the file a user sends when asking why it broke"
         )
+
+
+def _skipped_violation(component, threat, waived=False, waiver_reason="", policy="Security-High",
+               version="1.0.0"):
+    from nexus_autofix.iq.client import PolicyViolation
+
+    return PolicyViolation(
+        package_url=f"pkg:npm/{component}@{version}",
+        component=component,
+        policy_name=policy,
+        policy_id="p1",
+        threat_level=threat,
+        constraint_summary="",
+        is_waived=waived,
+        action="SECURITY",
+        current_version=version,
+        waiver_reason=waiver_reason,
+    )
+
+
+def test_skipped_components_are_named_with_their_reason(caplog):
+    """A bare count cannot distinguish a well-tuned threshold from one hiding something."""
+    import logging
+
+    from nexus_autofix import cli as cli_mod
+
+    with caplog.at_level(logging.INFO, logger="nexus_autofix.cli"):
+        cli_mod._log_skipped(
+            waived_out=[_skipped_violation("jackson-databind", 9, waived=True,
+                                   waiver_reason="auto-waiver")],
+            below_bar=[_skipped_violation("lodash", 5, policy="Security-Medium")],
+            min_threat_level=8,
+        )
+
+    assert "jackson-databind 1.0.0" in caplog.text
+    assert "auto-waiver" in caplog.text
+    assert "lodash 1.0.0" in caplog.text
+    assert "Security-Medium" in caplog.text
+    assert "below min_threat_level=8" in caplog.text
+
+
+def test_every_skipped_component_is_listed_not_a_top_n(caplog):
+    """Truncating would read as full coverage while omitting the one being looked for."""
+    import logging
+
+    from nexus_autofix import cli as cli_mod
+
+    below = [_skipped_violation(f"pkg-{i}", 3) for i in range(25)]
+    with caplog.at_level(logging.INFO, logger="nexus_autofix.cli"):
+        cli_mod._log_skipped(waived_out=[], below_bar=below, min_threat_level=8)
+
+    for i in range(25):
+        assert f"pkg-{i} " in caplog.text
+
+
+def test_a_near_miss_says_how_to_include_it(caplog):
+    import logging
+
+    from nexus_autofix import cli as cli_mod
+
+    with caplog.at_level(logging.INFO, logger="nexus_autofix.cli"):
+        cli_mod._log_skipped(
+            waived_out=[], below_bar=[_skipped_violation("almost", 7)], min_threat_level=8,
+        )
+
+    assert "one below the threshold" in caplog.text
+
+
+def test_a_waiver_of_unstated_kind_says_so_rather_than_inventing_one(caplog):
+    import logging
+
+    from nexus_autofix import cli as cli_mod
+
+    with caplog.at_level(logging.INFO, logger="nexus_autofix.cli"):
+        cli_mod._log_skipped(
+            waived_out=[_skipped_violation("mystery", 9, waived=True)], below_bar=[],
+            min_threat_level=8,
+        )
+
+    assert "waiver kind not stated by IQ" in caplog.text

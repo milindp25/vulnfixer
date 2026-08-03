@@ -197,7 +197,8 @@ def findings_from_policy_report(
     chance. One rejected component identifier must not sink the whole application.
     """
     findings = []
-    skipped = 0
+    waived_out: list = []
+    below_bar: list = []
     looked_up = 0
     expected = sum(
         1 for v in violations if not v.is_waived and v.threat_level >= min_threat_level
@@ -205,7 +206,7 @@ def findings_from_policy_report(
     for v in violations:
         if v.is_waived:
             findings.append(_finding_without_remediation(v, "waived in IQ"))
-            skipped += 1
+            waived_out.append(v)
             continue
         if v.threat_level < min_threat_level:
             findings.append(
@@ -213,7 +214,7 @@ def findings_from_policy_report(
                     v, f"threat level {v.threat_level} below threshold {min_threat_level}"
                 )
             )
-            skipped += 1
+            below_bar.append(v)
             continue
         # Prefer IQ's own identifier over one rebuilt from the purl — see
         # purl_to_component_identifier for why the rebuild is lossy.
@@ -290,8 +291,49 @@ def findings_from_policy_report(
             )
         )
     log.info("remediation: %d POST(s) sent, %d skipped as below the bar or waived",
-             looked_up, skipped)
+             looked_up, len(waived_out) + len(below_bar))
+    _log_skipped(waived_out, below_bar, min_threat_level)
     return findings
+
+
+def _log_skipped(waived_out: list, below_bar: list, min_threat_level: int) -> None:
+    """Name every component the run decided not to fix, and why.
+
+    A count alone ("6 skipped") is unauditable: it cannot distinguish a correctly-tuned
+    threshold from one set high enough to skip something that mattered, and it hides a
+    waiver that has quietly stopped being appropriate. Both lists are printed in full —
+    truncating to a top-N would read as complete coverage while omitting the very entry
+    somebody went looking for. Highest threat first, since the entries just under the
+    threshold are the ones worth arguing about.
+    """
+    if waived_out:
+        log.info("  skipped — waived in IQ (%d):", len(waived_out))
+        for v in sorted(waived_out, key=lambda v: -v.threat_level):
+            log.info(
+                "    %-40s threat %-3s %s  [%s]",
+                f"{v.component} {v.current_version}".strip(), v.threat_level,
+                v.policy_name or "(no policy name)",
+                # IQ omits the waiver's free-text comment from the policy report, so the
+                # kind of waiver is as much as this can honestly say. The comment is in
+                # the IQ UI against the component.
+                getattr(v, "waiver_reason", "") or "waiver kind not stated by IQ",
+            )
+    if below_bar:
+        log.info(
+            "  skipped — below min_threat_level=%d (%d):", min_threat_level, len(below_bar)
+        )
+        for v in sorted(below_bar, key=lambda v: -v.threat_level):
+            log.info(
+                "    %-40s threat %-3s %s",
+                f"{v.component} {v.current_version}".strip(), v.threat_level,
+                v.policy_name or "(no policy name)",
+            )
+        highest = max(v.threat_level for v in below_bar)
+        if highest == min_threat_level - 1:
+            log.info(
+                "    (the highest skipped is threat %d, one below the threshold — lower "
+                "min_threat_level in config.yml to %d to include it)", highest, highest,
+            )
 
 
 def logs_failures(command: str):

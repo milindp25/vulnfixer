@@ -112,6 +112,47 @@ autofix/nexus/<run-id>  ->  <the branch you passed>
 Both are recorded in `run.json` as `fix_branch` and `base_branch`. A branch that doesn't exist
 fails immediately, listing the ones that do.
 
+### Seeing transitive dependencies (Maven / Gradle)
+
+By default the scan is `sourceControlEvaluation` — IQ reads what's **committed**. For npm
+that's the whole story, because `package-lock.json` enumerates the full pinned tree. For
+Maven and Gradle it isn't: a `pom.xml` or `build.gradle` names **direct dependencies only**,
+and the transitive closure exists nowhere in the repo. So a Java repo reports findings on
+direct dependencies and silently says nothing about the rest.
+
+Point it at the Nexus IQ CLI jar and it scans the **built** application instead —
+fingerprinting the artifacts actually on the classpath, so the whole tree is visible:
+
+```yaml
+iq_cli_jar: /opt/nexus-iq-cli/nexus-iq-cli.jar
+# iq_cli_scan_target: build      # optional; defaults to the whole checkout
+# java_executable: java          # optional
+```
+
+It runs the same invocation your pipeline does:
+
+```
+java -jar <jar> -i <app> -r <result.json> -s <iq-url> -a <user:pass> -t <stage> <target>
+```
+
+Three consequences worth knowing:
+
+- **`discover` now builds the repo**, because there are no artifacts to scan otherwise. It
+  takes as long as a build, and a repo that can't build can't be discovered at all.
+- **`publish` rescans with the same scanner.** Mixing them is refused outright — a deep
+  baseline compared against a shallow rescan makes every transitive finding *look* cleared,
+  and `publish` would certify a fix that was never verified.
+- **A quarantined artifact still blocks it.** If the repository manager 403s a dependency,
+  the build fails and there's nothing to fingerprint. Deeper scan, same wall.
+
+Every run logs which scanner ran and what it saw:
+
+```
+IQ scanned 312 component(s): 47 direct, 265 transitive, 0 unmarked
+```
+
+If transitive is `0`, only direct dependencies are covered — the run warns, loudly.
+
 ### The usual sequence
 
 | Step | Who does it | What happens |

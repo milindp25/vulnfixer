@@ -42,6 +42,21 @@ class ProjectConfig:
     java_toolchains: dict[str, str]
     node_toolchains: dict[str, str]
     repos: dict[str, str]
+    #: Path to the Nexus IQ CLI jar. Set it and scanning switches from
+    #: `sourceControlEvaluation` to a CLI scan of the BUILT application, which is the only
+    #: way to see transitive dependencies for Maven and Gradle — a pom.xml or build.gradle
+    #: names direct dependencies only. Leave it unset for the SCM scan, which is already
+    #: sufficient for npm, where the lockfile enumerates the whole tree.
+    iq_cli_jar: str = ""
+    #: Directory the CLI scans, relative to the checkout. Empty means the whole checkout,
+    #: which is what the CLI documentation suggests and what finds artifacts wherever a
+    #: multi-module build put them.
+    iq_cli_scan_target: str = ""
+    java_executable: str = "java"
+
+    @property
+    def uses_iq_cli(self) -> bool:
+        return bool(self.iq_cli_jar)
 
 
 #: Loaded in this order, from the current working directory only. Earlier entries win,
@@ -96,4 +111,7 @@ def load_project_config(path: Path) -> ProjectConfig:
         java_toolchains={str(k): v for k, v in (toolchains.get("java") or {}).items()},
         node_toolchains={str(k): v for k, v in (toolchains.get("node") or {}).items()},
         repos=data.get("repos") or {},
+        iq_cli_jar=str(data.get("iq_cli_jar") or ""),
+        iq_cli_scan_target=str(data.get("iq_cli_scan_target") or ""),
+        java_executable=str(data.get("java_executable") or "java"),
     )

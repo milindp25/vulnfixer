@@ -19,6 +19,7 @@ from nexus_autofix.agent.copilot_cli import CopilotCLIAgent
 from nexus_autofix.agent.interactive import InteractiveAgent
 from nexus_autofix.agent.mock import MockAgent, MockMode
 from nexus_autofix.config import ProjectConfig, Secrets, load_project_config, load_secrets
+from nexus_autofix.iq import cli_scan as cli_scan_mod
 from nexus_autofix.iq import remediation as remediation_mod
 from nexus_autofix.iq.client import HTTPIQClient
 from nexus_autofix.iq.filter import is_a_real_upgrade
@@ -41,6 +42,7 @@ from nexus_autofix.state.store import StateStore
 from nexus_autofix.verify import commands as commands_mod
 from nexus_autofix.verify import diff as diff_mod
 from nexus_autofix.verify import rescan as rescan_mod
+from nexus_autofix.verify import toolchain as toolchain_mod
 
 log = logging.getLogger(__name__)
 
@@ -708,6 +710,105 @@ def gc_command(older_than_days: int):
 # ======================================================================================
 
 
+def _scan_for_report(
+    *, iq_client, config: ProjectConfig, secrets: Secrets, app_id: str, internal_id: str,
+    branch: str, worktree_path: Path, run_dir: Path, ecosystem: str,
+    java_version: str | None, node_version: str | None, label: str,
+) -> str:
+    """Scan the application and return the policy report id.
+
+    Two scanners, and which one runs is decided solely by `iq_cli_jar` in config.yml.
+
+    The SCM scan reads what is committed. For npm that is enough — the lockfile enumerates
+    the entire pinned tree — but a `pom.xml` or `build.gradle` declares direct dependencies
+    only, and the transitive closure is not in the repository at all. The CLI scans the
+    built application and fingerprints what actually landed on the classpath, so it sees
+    the whole tree; the cost is that the build must succeed first.
+
+    `label` distinguishes the baseline from the post-fix rescan in the log. Both go through
+    here so they cannot disagree about method — see `_require_matching_scan_method`.
+    """
+    if not config.uses_iq_cli:
+        log.info(
+            "%s scan: source control evaluation of %s (set iq_cli_jar in config.yml to "
+            "scan built artifacts instead, which is the only way to see transitive "
+            "dependencies for Maven and Gradle)", label, branch,
+        )
+        status_url = iq_client.start_source_control_evaluation(
+            internal_id, branch, config.default_stage_id
+        )
+        return iq_client.poll_evaluation(status_url, config.poll_timeout_seconds)
+
+    build_cmd = commands_mod.BUILD_COMMANDS[ecosystem](worktree_path)
+    env = dict(os.environ)
+    for version, table, resolve in (
+        (java_version, config.java_toolchains, toolchain_mod.resolve_java_env),
+        (node_version, config.node_toolchains, toolchain_mod.resolve_node_env),
+    ):
+        if version:
+            try:
+                env = resolve(version, table, env).env
+            except toolchain_mod.MissingToolchainError as exc:
+                raise click.ClickException(f"toolchain unavailable: {exc}") from exc
+
+    log.info("%s scan: building first, because the IQ CLI scans build output", label)
+    build = commands_mod.run_command(
+        build_cmd, worktree_path, env, config.subprocess_timeout_seconds
+    )
+    if not build.success:
+        # Not survivable, and saying so plainly beats scanning an empty directory and
+        # reporting an application with no components as an application with no problems.
+        raise click.ClickException(
+            f"the build failed, so there are no artifacts to scan: {' '.join(build_cmd)}\n"
+            f"{build.tail()}\n"
+            "A CLI scan reads build output. Fix the build, or unset iq_cli_jar in "
+            "config.yml to fall back to the source-control scan."
+        )
+
+    scan_target = (
+        worktree_path / config.iq_cli_scan_target
+        if config.iq_cli_scan_target else worktree_path
+    )
+    result = cli_scan_mod.run_cli_scan(
+        jar_path=Path(config.iq_cli_jar),
+        scan_target=scan_target,
+        app_id=app_id,
+        iq_url=secrets.iq_url,
+        username=secrets.iq_username,
+        password=secrets.iq_password,
+        stage_id=config.default_stage_id,
+        result_file=run_dir / f"{label}-{cli_scan_mod.RESULT_FILENAME}",
+        timeout_seconds=config.subprocess_timeout_seconds,
+        java_executable=config.java_executable,
+    )
+    return result.report_id
+
+
+def _require_matching_scan_method(state: dict, config: ProjectConfig) -> None:
+    """Refuse to compare a rescan against a baseline the other scanner produced.
+
+    This is the one way this feature could ship a false success. `compare_reports` decides
+    "cleared" by absence: a component in the baseline and not in the rescan is treated as
+    fixed. A deep CLI baseline holds the whole transitive closure; a source-control rescan
+    of a Gradle repo holds direct dependencies only. Compare the two and every transitive
+    finding *vanishes*, `all_cleared` comes back true, and `publish` certifies a fix that
+    was never verified and keeps the branch.
+
+    A green result that means nothing is worse than a red one, so this stops the run.
+    """
+    baseline_method = state.get("scan_method")
+    current_method = "iq-cli" if config.uses_iq_cli else "source-control"
+    if baseline_method and baseline_method != current_method:
+        raise click.ClickException(
+            f"this run's baseline was scanned with {baseline_method!r} but config.yml now "
+            f"selects {current_method!r}. The two see different sets of components, so a "
+            "comparison between them would report findings as cleared that were only ever "
+            "invisible to the second scan.\n"
+            "  Restore iq_cli_jar in config.yml to what it was for this run, or start a "
+            "new run with `nexusfix discover`."
+        )
+
+
 def perform_discovery(
     app_id: str, branch: str, config: ProjectConfig, secrets: Secrets, verbose: bool = False
 ) -> dict:
@@ -732,15 +833,9 @@ def perform_discovery(
     clone_or_update_mirror(repo_url, mirror_path)
     commit_sha = resolve_branch_commit_sha(mirror_path, branch)
 
-    status_url = iq_client.start_source_control_evaluation(
-        internal_id, branch, config.default_stage_id
-    )
-    baseline_report_id = iq_client.poll_evaluation(status_url, config.poll_timeout_seconds)
-    violations = iq_client.fetch_policy_report(app_id, baseline_report_id)
-    findings = findings_from_policy_report(
-        iq_client, internal_id, violations, config.default_stage_id, config.min_threat_level
-    )
-
+    # The checkout is made BEFORE the scan, not after. A CLI scan reads build output, so
+    # the application has to exist and be built first. The SCM scan does not care about
+    # the order, so doing it this way unconditionally keeps one code path rather than two.
     worktree = create_worktree(mirror_path, run_dir, commit_sha, fix_branch, repo_url)
     try:
         strategies = trident_mod.parse_trident_build_yaml(
@@ -760,6 +855,17 @@ def perform_discovery(
     java_version = strategy.toolchain.get("java")
     node_version = strategy.toolchain.get("node")
 
+    baseline_report_id = _scan_for_report(
+        iq_client=iq_client, config=config, secrets=secrets, app_id=app_id,
+        internal_id=internal_id, branch=branch, worktree_path=worktree.path,
+        run_dir=run_dir, ecosystem=strategy.ecosystem, java_version=java_version,
+        node_version=node_version, label="baseline",
+    )
+    violations = iq_client.fetch_policy_report(app_id, baseline_report_id)
+    findings = findings_from_policy_report(
+        iq_client, internal_id, violations, config.default_stage_id, config.min_threat_level
+    )
+
     views = agent_api.finding_views(findings, config.min_threat_level)
     state = {
         "run_id": run_id,
@@ -772,6 +878,9 @@ def perform_discovery(
         "commit_sha": commit_sha,
         "internal_id": internal_id,
         "baseline_report_id": baseline_report_id,
+        # Which scanner produced the baseline. `publish` refuses to compare a rescan
+        # from the other one — see _require_matching_scan_method.
+        "scan_method": "iq-cli" if config.uses_iq_cli else "source-control",
         "ecosystem": strategy.ecosystem,
         "java_version": java_version,
         "node_version": node_version,
@@ -1052,10 +1161,25 @@ def publish_command(run_id: str, dry_run: bool, open_pr: bool, verbose: bool):
     branch_mod.push_branch(worktree, "origin", fix_branch)
 
     log.info("rescanning %s to confirm the findings actually cleared", fix_branch)
-    rescan_status_url = iq_client.start_source_control_evaluation(
-        state["internal_id"], fix_branch, config.default_stage_id
-    )
-    rescan_report_id = iq_client.poll_evaluation(rescan_status_url, config.poll_timeout_seconds)
+    _require_matching_scan_method(state, config)
+    if config.uses_iq_cli:
+        # Scans the local checkout, which `check` already built and which `publish` has
+        # just confirmed is byte-for-byte what was verified. The pushed branch and this
+        # directory hold the same tree.
+        rescan_report_id = _scan_for_report(
+            iq_client=iq_client, config=config, secrets=secrets, app_id=state["app_id"],
+            internal_id=state["internal_id"], branch=fix_branch, worktree_path=worktree,
+            run_dir=run_dir, ecosystem=state["ecosystem"],
+            java_version=state.get("java_version"), node_version=state.get("node_version"),
+            label="rescan",
+        )
+    else:
+        rescan_status_url = iq_client.start_source_control_evaluation(
+            state["internal_id"], fix_branch, config.default_stage_id
+        )
+        rescan_report_id = iq_client.poll_evaluation(
+            rescan_status_url, config.poll_timeout_seconds
+        )
     comparison = rescan_mod.compare_reports(
         iq_client.fetch_policy_report(state["app_id"], state["baseline_report_id"]),
         iq_client.fetch_policy_report(state["app_id"], rescan_report_id),

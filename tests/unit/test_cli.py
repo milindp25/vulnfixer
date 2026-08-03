@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from nexus_autofix.cli import (
@@ -689,3 +691,134 @@ def test_a_waiver_of_unstated_kind_says_so_rather_than_inventing_one(caplog):
         )
 
     assert "waiver kind not stated by IQ" in caplog.text
+
+
+def _project_config(**overrides):
+    from nexus_autofix.config import ProjectConfig
+
+    base = dict(
+        subprocess_timeout_seconds=60, max_attempts=1, poll_timeout_seconds=60,
+        default_stage_id="build", default_gate="none", min_threat_level=8,
+        java_toolchains={}, node_toolchains={}, repos={"demo": "https://x/o/demo.git"},
+    )
+    base.update(overrides)
+    return ProjectConfig(**base)
+
+
+def test_a_rescan_from_the_other_scanner_is_refused():
+    """The one way this could ship a false success: compare_reports decides "cleared" by
+    absence, so a deep baseline against a shallow rescan clears everything invisibly."""
+    import click
+
+    from nexus_autofix import cli as cli_mod
+
+    with pytest.raises(click.ClickException) as exc:
+        cli_mod._require_matching_scan_method(
+            {"scan_method": "iq-cli"}, _project_config(iq_cli_jar=""),
+        )
+
+    assert "would report findings as cleared" in str(exc.value)
+    assert "nexusfix discover" in str(exc.value)
+
+
+def test_the_reverse_mismatch_is_refused_too():
+    import click
+
+    from nexus_autofix import cli as cli_mod
+
+    with pytest.raises(click.ClickException):
+        cli_mod._require_matching_scan_method(
+            {"scan_method": "source-control"}, _project_config(iq_cli_jar="/x/iq.jar"),
+        )
+
+
+def test_a_matching_scan_method_passes():
+    from nexus_autofix import cli as cli_mod
+
+    cli_mod._require_matching_scan_method(
+        {"scan_method": "iq-cli"}, _project_config(iq_cli_jar="/x/iq.jar")
+    )
+    cli_mod._require_matching_scan_method(
+        {"scan_method": "source-control"}, _project_config()
+    )
+
+
+def test_a_run_from_before_scan_method_was_recorded_is_not_blocked():
+    """Old run.json files have no scan_method. Those predate the CLI option entirely, so
+    they can only have been source-control scans; refusing them would strand them."""
+    from nexus_autofix import cli as cli_mod
+
+    cli_mod._require_matching_scan_method({}, _project_config())
+
+
+def test_without_the_jar_configured_the_scan_is_source_control():
+    from unittest.mock import MagicMock
+
+    from nexus_autofix import cli as cli_mod
+
+    iq_client = MagicMock()
+    iq_client.poll_evaluation.return_value = "report-1"
+
+    report_id = cli_mod._scan_for_report(
+        iq_client=iq_client, config=_project_config(), secrets=MagicMock(),
+        app_id="demo", internal_id="i1", branch="main", worktree_path=Path("/tmp/wt"),
+        run_dir=Path("/tmp/run"), ecosystem="gradle", java_version=None,
+        node_version=None, label="baseline",
+    )
+
+    assert report_id == "report-1"
+    iq_client.start_source_control_evaluation.assert_called_once()
+
+
+def test_with_the_jar_configured_the_app_is_built_then_scanned(tmp_path):
+    from unittest.mock import MagicMock, patch
+
+    from nexus_autofix import cli as cli_mod
+    from nexus_autofix.iq.cli_scan import CLIScanResult
+    from nexus_autofix.verify.commands import CommandResult
+
+    iq_client = MagicMock()
+    build_ok = CommandResult(returncode=0, stdout="", stderr="")
+    scanned = CLIScanResult(report_id="cli-report", policy_action="Failure",
+                            result_file=tmp_path / "r.json")
+
+    with patch.object(cli_mod.commands_mod, "run_command", return_value=build_ok) as build, \
+            patch.object(cli_mod.cli_scan_mod, "run_cli_scan", return_value=scanned) as scan:
+        report_id = cli_mod._scan_for_report(
+            iq_client=iq_client, config=_project_config(iq_cli_jar=str(tmp_path / "iq.jar")),
+            secrets=MagicMock(), app_id="demo", internal_id="i1", branch="main",
+            worktree_path=tmp_path, run_dir=tmp_path, ecosystem="gradle",
+            java_version=None, node_version=None, label="baseline",
+        )
+
+    assert report_id == "cli-report"
+    build.assert_called_once()
+    scan.assert_called_once()
+    iq_client.start_source_control_evaluation.assert_not_called()
+
+
+def test_a_failed_build_stops_rather_than_scanning_an_empty_directory(tmp_path):
+    """Scanning nothing yields an application with no components, which reads exactly like
+    an application with no problems."""
+    import click
+    from unittest.mock import MagicMock, patch
+
+    from nexus_autofix import cli as cli_mod
+    from nexus_autofix.verify.commands import CommandResult
+
+    failed = CommandResult(returncode=1, stdout="compile error", stderr="")
+
+    with patch.object(cli_mod.commands_mod, "run_command", return_value=failed), \
+            patch.object(cli_mod.cli_scan_mod, "run_cli_scan") as scan, \
+            pytest.raises(click.ClickException) as exc:
+        cli_mod._scan_for_report(
+            iq_client=MagicMock(),
+            config=_project_config(iq_cli_jar=str(tmp_path / "iq.jar")),
+            secrets=MagicMock(), app_id="demo", internal_id="i1", branch="main",
+            worktree_path=tmp_path, run_dir=tmp_path, ecosystem="gradle",
+            java_version=None, node_version=None, label="baseline",
+        )
+
+    assert "no artifacts to scan" in str(exc.value)
+    assert "compile error" in str(exc.value)
+    scan.assert_not_called()

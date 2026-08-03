@@ -15,12 +15,14 @@ The trade is that it needs a **built** application. No build, no artifacts, no s
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from nexus_autofix.http import make_session
 from nexus_autofix.iq.client import _report_id_from_url
 
 log = logging.getLogger(__name__)
@@ -37,6 +39,78 @@ class CLIScanResult:
     report_id: str
     policy_action: str
     result_file: Path
+
+
+def ensure_jar(jar_path: Path, download_url: str = "", sha256: str = "") -> Path:
+    """Return the CLI jar, fetching it from `download_url` if it is not already there.
+
+    Downloaded once and reused: the jar is written next to nothing else, so a present file
+    is never re-fetched and normal runs make no network call for it.
+
+    `sha256` is optional and checked when given. It is worth setting. This jar is executed
+    with your IQ credentials on its command line, so what it is matters — and a URL that
+    quietly starts serving something else is not a failure anyone would notice. Without a
+    checksum the only assurance is the URL and TLS, which is why its absence warns.
+    """
+    if jar_path.is_file():
+        log.debug("IQ CLI jar already present at %s", jar_path)
+        return jar_path
+    if not download_url:
+        raise IQCLIScanError(
+            f"Nexus IQ CLI jar not found at {jar_path}, and no download URL is configured.\n"
+            "  Either put the jar there, or set NEXUSFIX_IQ_CLI_URL (or iq_cli_download_url "
+            "in config.yml) to fetch it automatically."
+        )
+    if not download_url.lower().startswith("https://"):
+        # It is executed immediately afterwards, so plain HTTP would mean anyone on the
+        # path chooses what runs with the IQ credentials.
+        raise IQCLIScanError(
+            f"refusing to download the IQ CLI jar over a non-HTTPS URL: {download_url}"
+        )
+
+    log.info("IQ CLI jar not found at %s — downloading from %s", jar_path, download_url)
+    jar_path.parent.mkdir(parents=True, exist_ok=True)
+    # Downloaded to a temporary name in the same directory and moved into place only once
+    # complete, so an interrupted download cannot leave a truncated jar that looks present
+    # and fails obscurely on every later run.
+    partial = jar_path.with_suffix(jar_path.suffix + ".partial")
+    digest = hashlib.sha256()
+    try:
+        with make_session() as session:
+            response = session.get(download_url, stream=True, timeout=300)
+            response.raise_for_status()
+            with partial.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=1 << 16):
+                    if chunk:
+                        digest.update(chunk)
+                        handle.write(chunk)
+    except Exception as exc:
+        partial.unlink(missing_ok=True)
+        raise IQCLIScanError(f"could not download the IQ CLI jar from {download_url}: {exc}") from exc
+
+    actual = digest.hexdigest()
+    if sha256:
+        if actual.lower() != sha256.strip().lower():
+            partial.unlink(missing_ok=True)
+            raise IQCLIScanError(
+                f"the IQ CLI jar downloaded from {download_url} does not match the expected "
+                f"checksum.\n  expected sha256: {sha256.strip().lower()}\n"
+                f"  actual sha256:   {actual}\n"
+                "Nothing was installed. Either the URL is serving something different than "
+                "it was, or iq_cli_sha256 is stale."
+            )
+        log.info("IQ CLI jar checksum verified (sha256 %s)", actual)
+    else:
+        log.warning(
+            "downloaded the IQ CLI jar with no checksum to verify it against (sha256 of "
+            "what arrived: %s). This jar is executed with your IQ credentials on its "
+            "command line — set iq_cli_sha256 in config.yml (or NEXUSFIX_IQ_CLI_SHA256) to "
+            "this value so a change in what the URL serves is caught rather than run.",
+            actual,
+        )
+    partial.replace(jar_path)
+    log.info("IQ CLI jar installed at %s (%d bytes)", jar_path, jar_path.stat().st_size)
+    return jar_path
 
 
 def _redact(args: list[str]) -> str:

@@ -121,19 +121,45 @@ and the transitive closure exists nowhere in the repo. So a Java repo reports fi
 direct dependencies and silently says nothing about the rest.
 
 Point it at the Nexus IQ CLI jar and it scans the **built** application instead —
-fingerprinting the artifacts actually on the classpath, so the whole tree is visible:
+fingerprinting the artifacts actually on the classpath, so the whole tree is visible.
 
-```yaml
-iq_cli_jar: /opt/nexus-iq-cli/nexus-iq-cli.jar
-# iq_cli_scan_target: build      # optional; defaults to the whole checkout
-# java_executable: java          # optional
+The least you have to set is a download URL, in `.env`:
+
+```bash
+NEXUSFIX_IQ_CLI_URL=https://.../nexus-iq-cli.jar
 ```
+
+The jar is fetched once into `<workspace_root>/tools/` and reused; there's no path to keep
+in step across machines. The first download logs the jar's sha256 — pin it, because this
+jar is executed with your IQ credentials on its command line and a URL that quietly starts
+serving something else isn't a failure anyone would notice:
+
+```bash
+NEXUSFIX_IQ_CLI_SHA256=<the sha256 it logged>
+```
+
+| Setting | `.env` | `config.yml` | What |
+|---|---|---|---|
+| jar URL | `NEXUSFIX_IQ_CLI_URL` | `iq_cli_download_url` | fetched if the jar isn't there |
+| jar checksum | `NEXUSFIX_IQ_CLI_SHA256` | `iq_cli_sha256` | verified on download |
+| existing jar | `NEXUSFIX_IQ_CLI_JAR` | `iq_cli_jar` | use one you already have |
+| force a method | `NEXUSFIX_SCAN_METHOD` | `scan_method` | `iq-cli` or `source-control` |
+| scan subdirectory | `NEXUSFIX_IQ_CLI_SCAN_TARGET` | `iq_cli_scan_target` | defaults to the whole checkout |
+
+Environment wins over `config.yml` — the latter is committed and shared, while a jar's
+location is per-machine. Configuring a jar or a URL is what turns the CLI scan on;
+`scan_method` overrides that either way, which is how you fall back to the source-control
+scan when a build is broken and you still want findings.
 
 It runs the same invocation your pipeline does:
 
 ```
 java -jar <jar> -i <app> -r <result.json> -s <iq-url> -a <user:pass> -t <stage> <target>
 ```
+
+**Which build folder?** The run's own clone — `<workspace_root>/runs/<run-id>/wt`.
+`discover` clones the repo there, builds *there*, and scans *there*. Your local working
+copy and the directory you run `nexusfix` from are never built or scanned.
 
 Three consequences worth knowing:
 

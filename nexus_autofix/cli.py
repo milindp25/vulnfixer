@@ -769,8 +769,17 @@ def _scan_for_report(
         worktree_path / config.iq_cli_scan_target
         if config.iq_cli_scan_target else worktree_path
     )
+    # Default location, so setting only NEXUSFIX_IQ_CLI_URL is enough to get going: there
+    # is then no path to keep in step across machines, and the jar is fetched once.
+    jar_path = (
+        Path(config.iq_cli_jar) if config.iq_cli_jar
+        else secrets.workspace_root / "tools" / "nexus-iq-cli.jar"
+    )
+    jar_path = cli_scan_mod.ensure_jar(
+        jar_path, config.iq_cli_download_url, config.iq_cli_sha256
+    )
     result = cli_scan_mod.run_cli_scan(
-        jar_path=Path(config.iq_cli_jar),
+        jar_path=jar_path,
         scan_target=scan_target,
         app_id=app_id,
         iq_url=secrets.iq_url,

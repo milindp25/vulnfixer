@@ -781,6 +781,7 @@ def test_with_the_jar_configured_the_app_is_built_then_scanned(tmp_path):
     build_ok = CommandResult(returncode=0, stdout="", stderr="")
     scanned = CLIScanResult(report_id="cli-report", policy_action="Failure",
                             result_file=tmp_path / "r.json")
+    (tmp_path / "iq.jar").write_text("jar", encoding="utf-8")
 
     with patch.object(cli_mod.commands_mod, "run_command", return_value=build_ok) as build, \
             patch.object(cli_mod.cli_scan_mod, "run_cli_scan", return_value=scanned) as scan:

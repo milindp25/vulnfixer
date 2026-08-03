@@ -110,3 +110,67 @@ def test_a_non_truthy_value_does_not_disable_verification(monkeypatch):
     monkeypatch.delenv("NEXUSFIX_CA_BUNDLE", raising=False)
     monkeypatch.setenv("NEXUSFIX_INSECURE_SKIP_TLS_VERIFY", "false")
     assert tls_verify() is True
+
+
+def _write_config(tmp_path, body="repos: {}\n"):
+    path = tmp_path / "config.yml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_the_scan_method_defaults_to_source_control(tmp_path, monkeypatch):
+    from nexus_autofix.config import load_project_config
+
+    for var in ("NEXUSFIX_IQ_CLI_JAR", "NEXUSFIX_IQ_CLI_URL", "NEXUSFIX_SCAN_METHOD"):
+        monkeypatch.delenv(var, raising=False)
+
+    assert load_project_config(_write_config(tmp_path)).uses_iq_cli is False
+
+
+def test_configuring_a_jar_selects_the_cli_scan(tmp_path, monkeypatch):
+    from nexus_autofix.config import load_project_config
+
+    monkeypatch.delenv("NEXUSFIX_SCAN_METHOD", raising=False)
+    config = load_project_config(_write_config(tmp_path, "iq_cli_jar: /opt/iq.jar\n"))
+
+    assert config.uses_iq_cli is True
+
+
+def test_a_download_url_alone_selects_the_cli_scan(tmp_path, monkeypatch):
+    """So setting only the URL is enough — there is then no path to keep in step."""
+    from nexus_autofix.config import load_project_config
+
+    monkeypatch.delenv("NEXUSFIX_SCAN_METHOD", raising=False)
+    monkeypatch.delenv("NEXUSFIX_IQ_CLI_JAR", raising=False)
+    config = load_project_config(
+        _write_config(tmp_path, "iq_cli_download_url: https://x/iq.jar\n")
+    )
+
+    assert config.uses_iq_cli is True
+
+
+def test_the_environment_overrides_config_yml(tmp_path, monkeypatch):
+    """config.yml is committed and shared; the jar's location is per-machine."""
+    from nexus_autofix.config import load_project_config
+
+    monkeypatch.setenv("NEXUSFIX_IQ_CLI_JAR", "/machine/local/iq.jar")
+    config = load_project_config(_write_config(tmp_path, "iq_cli_jar: /from/config.jar\n"))
+
+    assert config.iq_cli_jar == "/machine/local/iq.jar"
+
+
+def test_scan_method_can_force_source_control_with_a_jar_still_configured(tmp_path, monkeypatch):
+    """Useful when a build is broken and findings are still wanted."""
+    from nexus_autofix.config import load_project_config
+
+    monkeypatch.setenv("NEXUSFIX_SCAN_METHOD", "source-control")
+    config = load_project_config(_write_config(tmp_path, "iq_cli_jar: /opt/iq.jar\n"))
+
+    assert config.uses_iq_cli is False
+
+
+def test_scan_method_can_force_the_cli(tmp_path, monkeypatch):
+    from nexus_autofix.config import load_project_config
+
+    monkeypatch.setenv("NEXUSFIX_SCAN_METHOD", "iq-cli")
+    assert load_project_config(_write_config(tmp_path)).uses_iq_cli is True

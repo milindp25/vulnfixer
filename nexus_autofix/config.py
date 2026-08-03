@@ -48,15 +48,31 @@ class ProjectConfig:
     #: names direct dependencies only. Leave it unset for the SCM scan, which is already
     #: sufficient for npm, where the lockfile enumerates the whole tree.
     iq_cli_jar: str = ""
+    #: Where to fetch the jar from when it is not already at `iq_cli_jar`. Set this alone
+    #: and the jar lands in <workspace_root>/tools/ without any path to maintain.
+    iq_cli_download_url: str = ""
+    #: Expected sha256 of the jar. Optional, and worth setting: the jar is executed with
+    #: your IQ credentials on its command line.
+    iq_cli_sha256: str = ""
     #: Directory the CLI scans, relative to the checkout. Empty means the whole checkout,
     #: which is what the CLI documentation suggests and what finds artifacts wherever a
     #: multi-module build put them.
     iq_cli_scan_target: str = ""
     java_executable: str = "java"
+    #: "iq-cli", "source-control", or "" to decide from whether a jar/URL is configured.
+    scan_method: str = ""
 
     @property
     def uses_iq_cli(self) -> bool:
-        return bool(self.iq_cli_jar)
+        """Whether to scan built artifacts with the CLI rather than the source branch.
+
+        An explicit `scan_method` always wins, so a jar can stay configured while a run is
+        deliberately put back on the source-control scan — useful when a build is broken
+        and findings are still wanted.
+        """
+        if self.scan_method:
+            return self.scan_method.strip().lower() in ("iq-cli", "cli", "iq_cli")
+        return bool(self.iq_cli_jar or self.iq_cli_download_url)
 
 
 #: Loaded in this order, from the current working directory only. Earlier entries win,
@@ -111,7 +127,18 @@ def load_project_config(path: Path) -> ProjectConfig:
         java_toolchains={str(k): v for k, v in (toolchains.get("java") or {}).items()},
         node_toolchains={str(k): v for k, v in (toolchains.get("node") or {}).items()},
         repos=data.get("repos") or {},
-        iq_cli_jar=str(data.get("iq_cli_jar") or ""),
-        iq_cli_scan_target=str(data.get("iq_cli_scan_target") or ""),
+        # Environment wins over config.yml for every one of these: config.yml is committed
+        # and shared, while the jar's location and the toggle are per-machine.
+        iq_cli_jar=os.environ.get("NEXUSFIX_IQ_CLI_JAR") or str(data.get("iq_cli_jar") or ""),
+        iq_cli_download_url=(
+            os.environ.get("NEXUSFIX_IQ_CLI_URL") or str(data.get("iq_cli_download_url") or "")
+        ),
+        iq_cli_sha256=(
+            os.environ.get("NEXUSFIX_IQ_CLI_SHA256") or str(data.get("iq_cli_sha256") or "")
+        ),
+        iq_cli_scan_target=(
+            os.environ.get("NEXUSFIX_IQ_CLI_SCAN_TARGET") or str(data.get("iq_cli_scan_target") or "")
+        ),
         java_executable=str(data.get("java_executable") or "java"),
+        scan_method=os.environ.get("NEXUSFIX_SCAN_METHOD") or str(data.get("scan_method") or ""),
     )

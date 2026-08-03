@@ -178,3 +178,107 @@ def test_the_whole_result_file_is_logged_so_a_schema_surprise_needs_one_round_tr
 def test_find_report_url_ignores_strings_that_are_not_reports():
     assert _find_report_url({"note": "no url here", "n": 3}) is None
     assert _find_report_url({"url": "https://iq/ui/dashboard"}) is None
+
+
+# --- ensure_jar -----------------------------------------------------------------------
+
+def _download(tmp_path, payload=b"jar bytes", **kwargs):
+    from nexus_autofix.iq.cli_scan import ensure_jar
+
+    session = MagicMock()
+    response = MagicMock()
+    response.iter_content.return_value = [payload]
+    response.raise_for_status.return_value = None
+    session.get.return_value = response
+    session.__enter__ = lambda s: s
+    session.__exit__ = lambda *a: None
+
+    with patch("nexus_autofix.iq.cli_scan.make_session", return_value=session):
+        return ensure_jar(tmp_path / "tools" / "iq.jar", **kwargs), session
+
+
+def test_an_existing_jar_is_never_re_downloaded(tmp_path):
+    from nexus_autofix.iq.cli_scan import ensure_jar
+
+    jar = tmp_path / "iq.jar"
+    jar.write_text("already here", encoding="utf-8")
+
+    with patch("nexus_autofix.iq.cli_scan.make_session") as session:
+        result = ensure_jar(jar, "https://example.com/iq.jar")
+
+    assert result == jar
+    session.assert_not_called()
+
+
+def test_a_missing_jar_is_downloaded_from_the_configured_url(tmp_path):
+    jar, session = _download(tmp_path, download_url="https://example.com/iq.jar")
+
+    assert jar.is_file()
+    assert jar.read_bytes() == b"jar bytes"
+    session.get.assert_called_once()
+
+
+def test_a_checksum_mismatch_installs_nothing(tmp_path):
+    """A URL that quietly starts serving something else is not a failure anyone notices,
+    and this jar runs with the IQ credentials on its command line."""
+    with pytest.raises(IQCLIScanError) as exc:
+        _download(tmp_path, download_url="https://example.com/iq.jar", sha256="0" * 64)
+
+    assert "does not match the expected checksum" in str(exc.value)
+    assert not (tmp_path / "tools" / "iq.jar").exists()
+    assert not (tmp_path / "tools" / "iq.jar.partial").exists()
+
+
+def test_a_matching_checksum_installs_the_jar(tmp_path):
+    import hashlib
+
+    expected = hashlib.sha256(b"jar bytes").hexdigest()
+    jar, _ = _download(tmp_path, download_url="https://example.com/iq.jar", sha256=expected)
+
+    assert jar.read_bytes() == b"jar bytes"
+
+
+def test_downloading_without_a_checksum_warns_and_prints_the_one_to_pin(tmp_path, caplog):
+    import hashlib
+
+    with caplog.at_level(logging.WARNING, logger="nexus_autofix.iq.cli_scan"):
+        _download(tmp_path, download_url="https://example.com/iq.jar")
+
+    assert hashlib.sha256(b"jar bytes").hexdigest() in caplog.text
+    assert "iq_cli_sha256" in caplog.text
+
+
+def test_a_plain_http_url_is_refused(tmp_path):
+    from nexus_autofix.iq.cli_scan import ensure_jar
+
+    with pytest.raises(IQCLIScanError) as exc:
+        ensure_jar(tmp_path / "iq.jar", "http://example.com/iq.jar")
+
+    assert "non-HTTPS" in str(exc.value)
+
+
+def test_an_interrupted_download_leaves_no_jar_behind(tmp_path):
+    """A truncated jar would look present and fail obscurely on every later run."""
+    from nexus_autofix.iq.cli_scan import ensure_jar
+
+    session = MagicMock()
+    session.__enter__ = lambda s: s
+    session.__exit__ = lambda *a: None
+    session.get.side_effect = OSError("connection reset")
+
+    with patch("nexus_autofix.iq.cli_scan.make_session", return_value=session), \
+            pytest.raises(IQCLIScanError) as exc:
+        ensure_jar(tmp_path / "iq.jar", "https://example.com/iq.jar")
+
+    assert "could not download" in str(exc.value)
+    assert not (tmp_path / "iq.jar").exists()
+    assert not (tmp_path / "iq.jar.partial").exists()
+
+
+def test_no_jar_and_no_url_names_both_ways_to_fix_it(tmp_path):
+    from nexus_autofix.iq.cli_scan import ensure_jar
+
+    with pytest.raises(IQCLIScanError) as exc:
+        ensure_jar(tmp_path / "iq.jar")
+
+    assert "NEXUSFIX_IQ_CLI_URL" in str(exc.value)

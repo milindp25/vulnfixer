@@ -823,3 +823,80 @@ def test_a_failed_build_stops_rather_than_scanning_an_empty_directory(tmp_path):
     assert "no artifacts to scan" in str(exc.value)
     assert "compile error" in str(exc.value)
     scan.assert_not_called()
+
+
+@pytest.mark.parametrize("ecosystem,builds", [
+    ("gradle", True), ("maven", True), ("npm", False), ("yarn", False), ("pnpm", False),
+])
+def test_only_compiled_ecosystems_are_built_before_the_cli_scan(tmp_path, ecosystem, builds):
+    """The live failure was a Node repo forced down the build-then-scan path with
+    iq_cli_scan_target=build, which has nothing to scan and, worse, would have reported an
+    application with no dependencies had a build/ directory happened to exist."""
+    from unittest.mock import MagicMock, patch
+
+    from nexus_autofix import cli as cli_mod
+    from nexus_autofix.iq.cli_scan import CLIScanResult
+    from nexus_autofix.verify.commands import CommandResult
+
+    (tmp_path / "iq.jar").write_text("jar", encoding="utf-8")
+    (tmp_path / "yarn.lock").write_text("{}", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "pnpm-lock.yaml").write_text("{}", encoding="utf-8")
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "target").mkdir()
+
+    scanned = CLIScanResult(report_id="r", policy_action="None",
+                            result_file=tmp_path / "r.json")
+
+    with patch.object(cli_mod.commands_mod, "run_command",
+                      return_value=CommandResult(0, "", "")) as build, \
+            patch.object(cli_mod.cli_scan_mod, "run_cli_scan", return_value=scanned) as scan:
+        cli_mod._scan_for_report(
+            iq_client=MagicMock(),
+            config=_project_config(iq_cli_jar=str(tmp_path / "iq.jar")),
+            secrets=MagicMock(), app_id="demo", internal_id="i1", branch="main",
+            worktree_path=tmp_path, run_dir=tmp_path, ecosystem=ecosystem,
+            java_version=None, node_version=None, label="baseline",
+        )
+
+    assert build.called is builds, (
+        f"{ecosystem}: expected build={builds}. A lockfile already pins the resolved tree, "
+        "so building a Node project before scanning only costs minutes."
+    )
+    targets = [p.name for p in scan.call_args.kwargs["scan_targets"]]
+    if builds:
+        assert targets in (["build"], ["target"])
+    else:
+        assert "package.json" in targets
+        assert any("lock" in t for t in targets)
+
+
+def test_the_node_rescan_reads_the_regenerated_lockfile(tmp_path):
+    """`publish` verifies by absence, so the rescan has to see the agent's NEW lockfile —
+    the one `check` built and verified, in the same checkout."""
+    from unittest.mock import MagicMock, patch
+
+    from nexus_autofix import cli as cli_mod
+    from nexus_autofix.iq.cli_scan import CLIScanResult
+
+    (tmp_path / "iq.jar").write_text("jar", encoding="utf-8")
+    (tmp_path / "yarn.lock").write_text('{"brace-expansion": "5.0.8"}', encoding="utf-8")
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+
+    scanned = CLIScanResult(report_id="rescan-1", policy_action="None",
+                            result_file=tmp_path / "r.json")
+    with patch.object(cli_mod.cli_scan_mod, "run_cli_scan", return_value=scanned) as scan:
+        report_id = cli_mod._scan_for_report(
+            iq_client=MagicMock(),
+            config=_project_config(iq_cli_jar=str(tmp_path / "iq.jar")),
+            secrets=MagicMock(), app_id="demo", internal_id="i1",
+            branch="autofix/nexus/x", worktree_path=tmp_path, run_dir=tmp_path,
+            ecosystem="yarn", java_version=None, node_version=None, label="rescan",
+        )
+
+    assert report_id == "rescan-1"
+    lockfile = next(
+        p for p in scan.call_args.kwargs["scan_targets"] if p.name == "yarn.lock"
+    )
+    assert "5.0.8" in lockfile.read_text(encoding="utf-8")

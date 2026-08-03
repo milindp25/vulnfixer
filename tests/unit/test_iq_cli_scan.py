@@ -403,3 +403,97 @@ def test_no_scan_target_at_all_is_an_error_rather_than_scanning_nothing(tmp_path
         )
 
     assert "no scan target was resolved" in str(exc.value)
+
+
+def test_every_supported_ecosystem_has_defined_scan_behaviour():
+    """Introspective, so an ecosystem added to the tool later cannot quietly fall through.
+
+    Falling through is not a crash — it scans the whole checkout without building — which
+    for a compiled ecosystem means fingerprinting a tree with no artifacts in it and
+    reporting an application with no components.
+    """
+    from nexus_autofix.iq.cli_scan import (
+        BUILD_BEFORE_SCAN,
+        _NODE_MANIFESTS,
+        _OUTPUT_DIRS,
+    )
+    from nexus_autofix.repo.trident import KNOWN_ECOSYSTEMS
+
+    for ecosystem in KNOWN_ECOSYSTEMS:
+        described = ecosystem in _NODE_MANIFESTS or ecosystem in _OUTPUT_DIRS
+        assert described, (
+            f"{ecosystem!r} has no scan target rule — it would scan the whole checkout. "
+            "Add it to _NODE_MANIFESTS (lockfile-based) or _OUTPUT_DIRS (build output), "
+            "and decide whether it belongs in BUILD_BEFORE_SCAN."
+        )
+        # A compiled ecosystem that is not built first has nothing to fingerprint.
+        if ecosystem in _OUTPUT_DIRS:
+            assert ecosystem in BUILD_BEFORE_SCAN, (
+                f"{ecosystem!r} is scanned at its build output but is not built first"
+            )
+        if ecosystem in _NODE_MANIFESTS:
+            assert ecosystem not in BUILD_BEFORE_SCAN, (
+                f"{ecosystem!r} reads a lockfile, so building first only costs time"
+            )
+
+
+@pytest.mark.parametrize("ecosystem,files,dirs,expected", [
+    ("yarn", ("yarn.lock", "package.json"), (), ["yarn.lock", "package.json"]),
+    ("npm", ("package-lock.json", "package.json"), (), ["package-lock.json", "package.json"]),
+    ("npm", ("npm-shrinkwrap.json", "package.json"), (),
+     ["npm-shrinkwrap.json", "package.json"]),
+    ("pnpm", ("pnpm-lock.yaml", "package.json"), (), ["pnpm-lock.yaml", "package.json"]),
+    ("gradle", (), ("build",), ["build"]),
+    ("maven", (), ("target",), ["target"]),
+])
+def test_a_realistic_checkout_resolves_to_the_right_cli_arguments(
+    tmp_path, ecosystem, files, dirs, expected
+):
+    """End to end from a checkout on disk to the argv the CLI is handed."""
+    from nexus_autofix.iq.cli_scan import default_scan_targets
+
+    for name in files:
+        (tmp_path / name).write_text("{}", encoding="utf-8")
+    for name in dirs:
+        (tmp_path / name).mkdir()
+
+    targets = default_scan_targets(ecosystem, tmp_path)
+    assert [t.name for t in targets] == expected
+
+    result_file = tmp_path / "result.json"
+
+    def fake_run(args, **_):
+        result_file.write_text(
+            json.dumps({"reportDataUrl": "api/v2/applications/a/reports/r/raw"}),
+            encoding="utf-8",
+        )
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("nexus_autofix.iq.cli_scan.subprocess.run", side_effect=fake_run) as mock:
+        run_cli_scan(
+            jar_path=_jar(tmp_path), scan_targets=targets, app_id="demo",
+            iq_url="https://iq", username="u", password="p", stage_id="build",
+            result_file=result_file, timeout_seconds=60,
+        )
+
+    argv = mock.call_args.args[0]
+    assert argv[-len(expected):] == [str(tmp_path / name) for name in expected]
+
+
+def test_a_node_repo_with_no_manifest_at_the_root_is_an_explicit_failure(tmp_path):
+    """A monorepo whose package.json is in a subdirectory. Better to stop and be told than
+    to scan the whole checkout and report whatever it happens to find."""
+    from nexus_autofix.iq.cli_scan import default_scan_targets
+
+    (tmp_path / "packages" / "app").mkdir(parents=True)
+    (tmp_path / "packages" / "app" / "package.json").write_text("{}", encoding="utf-8")
+
+    assert default_scan_targets("npm", tmp_path) == []
+
+    with pytest.raises(IQCLIScanError) as exc:
+        run_cli_scan(
+            jar_path=_jar(tmp_path), scan_targets=[], app_id="demo", iq_url="https://iq",
+            username="u", password="p", stage_id="build",
+            result_file=tmp_path / "r.json", timeout_seconds=60,
+        )
+    assert "iq_cli_scan_target" in str(exc.value)

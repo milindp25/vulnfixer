@@ -278,3 +278,76 @@ def test_an_unset_scan_target_defers_to_the_ecosystem(tmp_path, monkeypatch):
     (tmp_path / "config.yml").write_text("repos: {}\n", encoding="utf-8")
 
     assert load_project_config(tmp_path / "config.yml").iq_cli_scan_target == ()
+
+
+def _cfg(tmp_path, monkeypatch, body):
+    from nexus_autofix.config import load_project_config
+
+    for var in ("NEXUSFIX_IQ_CLI_SCAN_TARGET", "NEXUSFIX_SCAN_METHOD"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yml").write_text(body, encoding="utf-8")
+    return load_project_config(tmp_path / "config.yml")
+
+
+def test_the_short_repo_form_still_works(tmp_path, monkeypatch):
+    config = _cfg(tmp_path, monkeypatch, "repos:\n  demo: https://x/o/demo.git\n")
+
+    assert config.repos == {"demo": "https://x/o/demo.git"}
+    assert config.scan_targets_for("demo") == ()
+    assert config.prescan_command_for("demo") == []
+
+
+def test_a_repo_block_carries_its_own_scan_recipe(tmp_path, monkeypatch):
+    """One global scan target is wrong for one of any two repos by construction."""
+    config = _cfg(tmp_path, monkeypatch, """
+default_stage_id: build
+repos:
+  java-svc: https://x/o/java-svc.git
+  node-app:
+    url: https://x/o/node-app.git
+    scan_target: [yarn.lock, package.json]
+    stage_id: stage-release
+""")
+
+    assert config.repos["node-app"] == "https://x/o/node-app.git"
+    assert config.scan_targets_for("node-app") == ("yarn.lock", "package.json")
+    assert config.stage_id_for("node-app") == "stage-release"
+    # The Java repo is untouched by the Node repo's settings.
+    assert config.scan_targets_for("java-svc") == ()
+    assert config.stage_id_for("java-svc") == "build"
+
+
+def test_a_per_repo_scan_target_beats_the_global_one(tmp_path, monkeypatch):
+    config = _cfg(tmp_path, monkeypatch, """
+iq_cli_scan_target: build
+repos:
+  node-app:
+    url: https://x/o/node-app.git
+    scan_target: yarn.lock, package.json
+""")
+
+    assert config.scan_targets_for("node-app") == ("yarn.lock", "package.json")
+
+
+def test_a_prescan_command_is_read_as_a_command_line(tmp_path, monkeypatch):
+    config = _cfg(tmp_path, monkeypatch, """
+repos:
+  packed-app:
+    url: https://x/o/packed.git
+    prescan_command: yarn pack --filename package.tgz
+    scan_target: [yarn.lock, package/package.json]
+""")
+
+    assert config.prescan_command_for("packed-app") == [
+        "yarn", "pack", "--filename", "package.tgz"
+    ]
+
+
+def test_a_repo_block_without_a_url_says_what_to_do(tmp_path, monkeypatch):
+    import pytest
+
+    with pytest.raises(ValueError) as exc:
+        _cfg(tmp_path, monkeypatch, "repos:\n  broken:\n    scan_target: build\n")
+
+    assert "no `url:` key" in str(exc.value)

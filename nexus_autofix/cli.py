@@ -783,14 +783,50 @@ def _scan_for_report(
             "resolved tree, which is what the CLI reads", label, ecosystem,
         )
 
-    if config.iq_cli_scan_target:
-        scan_targets = [worktree_path / t for t in config.iq_cli_scan_target]
+    prescan = config.prescan_command_for(app_id)
+    if prescan:
+        # For a repo whose scan target is a build artifact rather than a committed file —
+        # an extracted `npm pack` tarball, say. Configured per repo because it describes
+        # that repository's pipeline, and there is no way to infer it.
+        log.info("%s scan: running prescan command: %s", label, " ".join(prescan))
+        result = commands_mod.run_command(
+            prescan, worktree_path, dict(os.environ), config.subprocess_timeout_seconds
+        )
+        if not result.success:
+            raise click.ClickException(
+                f"the prescan command failed: {' '.join(prescan)}\n{result.tail()}\n"
+                f"It is configured as `prescan_command` under repos.{app_id} in config.yml."
+            )
+
+    configured = config.scan_targets_for(app_id)
+    if configured:
+        scan_targets = [worktree_path / t for t in configured]
+        source = f"configured for {app_id}"
     else:
         scan_targets = cli_scan_mod.default_scan_targets(ecosystem, worktree_path)
+        source = f"{ecosystem} default"
     log.info(
-        "%s scan targets: %s", label,
+        "%s scan targets (%s): %s", label, source,
         ", ".join(str(t.relative_to(worktree_path)) for t in scan_targets) or "(none)",
     )
+    missing = [t for t in scan_targets if not t.exists()]
+    if missing and configured:
+        # Names the setting AND where it came from. The live confusion was a Node repo
+        # hunting for `build/` because of a global override, where the error described
+        # only the symptom and left the cause to be guessed at.
+        raise click.ClickException(
+            "the configured scan target(s) do not exist in this repository: "
+            + ", ".join(str(m.relative_to(worktree_path)) for m in missing) + "\n"
+            f"  These came from an explicit setting, not from the {ecosystem} default. If "
+            f"they describe a different repository — a `build` directory on a Node app, "
+            f"say — clear NEXUSFIX_IQ_CLI_SCAN_TARGET and the global iq_cli_scan_target, "
+            f"and set `scan_target` under repos.{app_id} in config.yml instead.\n"
+            f"  Cleared entirely, the {ecosystem} default would scan: "
+            + ", ".join(
+                str(t.relative_to(worktree_path))
+                for t in cli_scan_mod.default_scan_targets(ecosystem, worktree_path)
+            )
+        )
     # Default location, so setting only NEXUSFIX_IQ_CLI_URL is enough to get going: there
     # is then no path to keep in step across machines, and the jar is fetched once.
     jar_path = (
@@ -807,7 +843,7 @@ def _scan_for_report(
         iq_url=secrets.iq_url,
         username=secrets.iq_username,
         password=secrets.iq_password,
-        stage_id=config.default_stage_id,
+        stage_id=config.stage_id_for(app_id),
         result_file=run_dir / f"{label}-{cli_scan_mod.RESULT_FILENAME}",
         timeout_seconds=config.subprocess_timeout_seconds,
         java_executable=config.java_executable,

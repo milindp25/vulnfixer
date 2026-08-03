@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+import shlex
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -42,6 +43,12 @@ class ProjectConfig:
     java_toolchains: dict[str, str]
     node_toolchains: dict[str, str]
     repos: dict[str, str]
+    #: Per-application overrides, keyed by the same public application ID as `repos`.
+    #: These settings are properties of the REPOSITORY, not of the machine: a Java service
+    #: and a Node app need different scan targets and often different IQ stages, so a
+    #: single global value is wrong for one of them by construction. Global settings
+    #: remain the fallback.
+    repo_settings: dict[str, dict] = field(default_factory=dict)
     #: Path to the Nexus IQ CLI jar. Set it and scanning switches from
     #: `sourceControlEvaluation` to a CLI scan of the BUILT application, which is the only
     #: way to see transitive dependencies for Maven and Gradle — a pom.xml or build.gradle
@@ -62,6 +69,38 @@ class ProjectConfig:
     java_executable: str = "java"
     #: "iq-cli", "source-control", or "" to decide from whether a jar/URL is configured.
     scan_method: str = ""
+
+    def scan_targets_for(self, app_id: str) -> tuple[str, ...]:
+        """Scan target(s) for one application, or () to derive them from the ecosystem.
+
+        Per-repo first, because that is the only level at which the answer can be right:
+        a Node repo's targets are its lockfile and manifest, a Java repo's is its build
+        output, and one global value set for either breaks the other. That is not
+        hypothetical — a global `build` made a Node repo look for a directory it has no
+        reason to contain.
+        """
+        override = (self.repo_settings.get(app_id) or {}).get("scan_target")
+        if override:
+            return _scan_targets(override)
+        return self.iq_cli_scan_target
+
+    def stage_id_for(self, app_id: str) -> str:
+        """IQ stage for one application. The stage selects which policies apply, so a
+        repo whose pipeline scans at `stage-release` will report a different set of
+        violations if scanned at `build`."""
+        return str((self.repo_settings.get(app_id) or {}).get("stage_id") or self.default_stage_id)
+
+    def prescan_command_for(self, app_id: str) -> list[str]:
+        """Command to run in the checkout before scanning, if this repo needs one.
+
+        For repos whose scan target is a build artifact — an extracted `npm pack` tarball,
+        say — rather than a file that is committed. Empty for the common case, where the
+        ecosystem default already does the right thing.
+        """
+        raw = (self.repo_settings.get(app_id) or {}).get("prescan_command") or ""
+        if isinstance(raw, (list, tuple)):
+            return [str(part) for part in raw]
+        return shlex.split(str(raw)) if str(raw).strip() else []
 
     @property
     def uses_iq_cli(self) -> bool:
@@ -144,12 +183,42 @@ def _scan_targets(value) -> tuple[str, ...]:
     return tuple(part.strip() for part in str(value).split(",") if part.strip())
 
 
+def _parse_repos(raw) -> tuple[dict[str, str], dict[str, dict]]:
+    """Split the `repos:` block into clone URLs and per-repo overrides.
+
+    Both forms are accepted, because the short one is right for most repos:
+
+        repos:
+          simple-app: https://github.com/org/simple-app.git
+          node-app:
+            url: https://github.com/org/node-app.git
+            scan_target: [yarn.lock, package.json]
+            stage_id: stage-release
+    """
+    urls: dict[str, str] = {}
+    settings: dict[str, dict] = {}
+    for app_id, value in (raw or {}).items():
+        if isinstance(value, dict):
+            url = value.get("url") or value.get("repo_url") or ""
+            if not url:
+                raise ValueError(
+                    f"repos.{app_id} is a block but has no `url:` key. Either give it one, "
+                    f"or write it as `{app_id}: <clone url>`."
+                )
+            urls[str(app_id)] = str(url)
+            settings[str(app_id)] = {k: v for k, v in value.items() if k not in ("url", "repo_url")}
+        else:
+            urls[str(app_id)] = str(value)
+    return urls, settings
+
+
 def load_project_config(path: Path) -> ProjectConfig:
     # Before reading anything, because several settings below fall back to os.environ and
     # every caller loads this file before it loads secrets. See `load_env_files`.
     load_env_files()
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     toolchains = data.get("toolchains") or {}
+    repos, repo_settings = _parse_repos(data.get("repos"))
     return ProjectConfig(
         subprocess_timeout_seconds=data.get("subprocess_timeout_seconds", 1800),
         max_attempts=data.get("max_attempts", 2),
@@ -159,7 +228,8 @@ def load_project_config(path: Path) -> ProjectConfig:
         min_threat_level=int(data.get("min_threat_level", DEFAULT_MIN_THREAT_LEVEL)),
         java_toolchains={str(k): v for k, v in (toolchains.get("java") or {}).items()},
         node_toolchains={str(k): v for k, v in (toolchains.get("node") or {}).items()},
-        repos=data.get("repos") or {},
+        repos=repos,
+        repo_settings=repo_settings,
         # Environment wins over config.yml for every one of these: config.yml is committed
         # and shared, while the jar's location and the toggle are per-machine.
         iq_cli_jar=os.environ.get("NEXUSFIX_IQ_CLI_JAR") or str(data.get("iq_cli_jar") or ""),

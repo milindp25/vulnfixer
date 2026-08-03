@@ -147,7 +147,26 @@ NEXUSFIX_IQ_CLI_SHA256=<the sha256 it logged>
 | scan target(s) | `NEXUSFIX_IQ_CLI_SCAN_TARGET` | `iq_cli_scan_target` | comma-separated / YAML list; defaults per ecosystem |
 
 Environment wins over `config.yml` — the latter is committed and shared, while a jar's
-location is per-machine. Configuring a jar or a URL is what turns the CLI scan on;
+location is per-machine.
+
+**Scan targets and the IQ stage belong per repo, not per machine.** A Java service and a
+Node app need different ones, so a single global value is wrong for one of them by
+construction. Put them on the repo:
+
+```yaml
+repos:
+  java-svc: https://github.com/org/java-svc.git      # ecosystem default: build then scan build/
+
+  node-app:
+    url: https://github.com/org/node-app.git
+    scan_target: [yarn.lock, package.json]           # optional; this IS the yarn default
+    stage_id: stage-release                          # if this repo's pipeline scans there
+    prescan_command: yarn pack                       # only if the target is a build artifact
+```
+
+Most repos need nothing beyond the URL. Reach for `scan_target` only when the layout is
+unusual — a monorepo, or a packed tarball like `package-tar/package/package.json` — and
+for `prescan_command` only when the target is produced by a build rather than committed. Configuring a jar or a URL is what turns the CLI scan on;
 `scan_method` overrides that either way, which is how you fall back to the source-control
 scan when a build is broken and you still want findings.
 

@@ -900,3 +900,98 @@ def test_the_node_rescan_reads_the_regenerated_lockfile(tmp_path):
         p for p in scan.call_args.kwargs["scan_targets"] if p.name == "yarn.lock"
     )
     assert "5.0.8" in lockfile.read_text(encoding="utf-8")
+
+
+def test_clearing_the_global_scan_target_does_not_stop_java_building(tmp_path):
+    """The worry when removing NEXUSFIX_IQ_CLI_SCAN_TARGET=build: that the Java repo
+    stops building. It does not — the gradle default already builds and scans `build/`.
+    The global setting was only ever forcing that answer onto repos it was wrong for.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from nexus_autofix import cli as cli_mod
+    from nexus_autofix.iq.cli_scan import CLIScanResult
+    from nexus_autofix.verify.commands import CommandResult
+
+    (tmp_path / "iq.jar").write_text("jar", encoding="utf-8")
+    (tmp_path / "build").mkdir()
+    scanned = CLIScanResult(report_id="r", policy_action="None", result_file=tmp_path / "r.json")
+
+    config = _project_config(iq_cli_jar=str(tmp_path / "iq.jar"))
+    assert config.scan_targets_for("demo") == (), "precondition: nothing configured"
+
+    with patch.object(cli_mod.commands_mod, "run_command",
+                      return_value=CommandResult(0, "", "")) as build, \
+            patch.object(cli_mod.cli_scan_mod, "run_cli_scan", return_value=scanned) as scan:
+        cli_mod._scan_for_report(
+            iq_client=MagicMock(), config=config, secrets=MagicMock(), app_id="demo",
+            internal_id="i1", branch="main", worktree_path=tmp_path, run_dir=tmp_path,
+            ecosystem="gradle", java_version=None, node_version=None, label="baseline",
+        )
+
+    assert build.called, "gradle must still build before scanning"
+    assert [p.name for p in scan.call_args.kwargs["scan_targets"]] == ["build"]
+
+
+def test_a_configured_target_that_is_missing_names_the_setting_and_the_alternative(tmp_path):
+    """The live confusion: a Node repo hunting for `build/` because of a global override,
+    where the error described the symptom and left the cause to be guessed at."""
+    import click
+    from unittest.mock import MagicMock, patch
+
+    from nexus_autofix import cli as cli_mod
+
+    (tmp_path / "iq.jar").write_text("jar", encoding="utf-8")
+    (tmp_path / "yarn.lock").write_text("{}", encoding="utf-8")
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+
+    config = _project_config(
+        iq_cli_jar=str(tmp_path / "iq.jar"), iq_cli_scan_target=("build",)
+    )
+
+    with patch.object(cli_mod.cli_scan_mod, "run_cli_scan") as scan, \
+            pytest.raises(click.ClickException) as exc:
+        cli_mod._scan_for_report(
+            iq_client=MagicMock(), config=config, secrets=MagicMock(), app_id="demo",
+            internal_id="i1", branch="main", worktree_path=tmp_path, run_dir=tmp_path,
+            ecosystem="yarn", java_version=None, node_version=None, label="baseline",
+        )
+
+    message = str(exc.value)
+    assert "NEXUSFIX_IQ_CLI_SCAN_TARGET" in message
+    assert "not from the yarn default" in message
+    # And says what clearing it would give instead, so the fix needs no further digging.
+    assert "yarn.lock" in message and "package.json" in message
+    scan.assert_not_called()
+
+
+def test_a_per_repo_prescan_command_runs_in_the_checkout(tmp_path):
+    """For a repo whose scan target really is a build artifact — an extracted npm pack
+    tarball — rather than a committed file."""
+    from unittest.mock import MagicMock, patch
+
+    from nexus_autofix import cli as cli_mod
+    from nexus_autofix.iq.cli_scan import CLIScanResult
+    from nexus_autofix.verify.commands import CommandResult
+
+    (tmp_path / "iq.jar").write_text("jar", encoding="utf-8")
+    (tmp_path / "yarn.lock").write_text("{}", encoding="utf-8")
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+
+    config = _project_config(
+        iq_cli_jar=str(tmp_path / "iq.jar"),
+        repo_settings={"demo": {"prescan_command": "yarn pack"}},
+    )
+    scanned = CLIScanResult(report_id="r", policy_action="None", result_file=tmp_path / "r.json")
+
+    with patch.object(cli_mod.commands_mod, "run_command",
+                      return_value=CommandResult(0, "", "")) as run, \
+            patch.object(cli_mod.cli_scan_mod, "run_cli_scan", return_value=scanned):
+        cli_mod._scan_for_report(
+            iq_client=MagicMock(), config=config, secrets=MagicMock(), app_id="demo",
+            internal_id="i1", branch="main", worktree_path=tmp_path, run_dir=tmp_path,
+            ecosystem="yarn", java_version=None, node_version=None, label="baseline",
+        )
+
+    assert run.call_args.args[0] == ["yarn", "pack"]
+    assert run.call_args.args[1] == tmp_path, "runs in the checkout, not the config dir"

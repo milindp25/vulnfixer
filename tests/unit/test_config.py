@@ -174,3 +174,64 @@ def test_scan_method_can_force_the_cli(tmp_path, monkeypatch):
 
     monkeypatch.setenv("NEXUSFIX_SCAN_METHOD", "iq-cli")
     assert load_project_config(_write_config(tmp_path)).uses_iq_cli is True
+
+
+def test_env_file_settings_reach_the_project_config_without_loading_secrets_first(
+    tmp_path, monkeypatch
+):
+    """The live failure: NEXUSFIX_SCAN_METHOD=iq-cli in .env was ignored and discover kept
+    calling the source-control API.
+
+    Every command reads config.yml first and secrets second, and the dotenv load lived in
+    `load_secrets` alone — so `load_project_config` read a process environment that .env
+    had not been applied to yet, and silently used its config.yml default. Exporting the
+    variable in the shell worked, which made it look like the setting itself was fine.
+    """
+    from nexus_autofix.config import load_project_config
+
+    monkeypatch.delenv("NEXUSFIX_SCAN_METHOD", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("NEXUSFIX_SCAN_METHOD=iq-cli\n", encoding="utf-8")
+    (tmp_path / "config.yml").write_text("repos: {}\n", encoding="utf-8")
+
+    config = load_project_config(tmp_path / "config.yml")
+
+    assert config.scan_method == "iq-cli"
+    assert config.uses_iq_cli is True
+
+
+def test_every_env_backed_project_setting_is_readable_from_a_dotenv_file(tmp_path, monkeypatch):
+    """Introspective, so a setting added later is covered without editing this test."""
+    from nexus_autofix.config import load_project_config
+
+    env_to_field = {
+        "NEXUSFIX_IQ_CLI_JAR": ("iq_cli_jar", "/from/env.jar"),
+        "NEXUSFIX_IQ_CLI_URL": ("iq_cli_download_url", "https://env/iq.jar"),
+        "NEXUSFIX_IQ_CLI_SHA256": ("iq_cli_sha256", "abc123"),
+        "NEXUSFIX_IQ_CLI_SCAN_TARGET": ("iq_cli_scan_target", "build"),
+        "NEXUSFIX_SCAN_METHOD": ("scan_method", "iq-cli"),
+    }
+    for var in env_to_field:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "".join(f"{var}={value}\n" for var, (_, value) in env_to_field.items()),
+        encoding="utf-8",
+    )
+    (tmp_path / "config.yml").write_text("repos: {}\n", encoding="utf-8")
+
+    config = load_project_config(tmp_path / "config.yml")
+
+    for var, (field, value) in env_to_field.items():
+        assert getattr(config, field) == value, f"{var} did not reach {field}"
+
+
+def test_a_shell_variable_still_beats_the_env_file(tmp_path, monkeypatch):
+    from nexus_autofix.config import load_project_config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NEXUSFIX_SCAN_METHOD", "source-control")
+    (tmp_path / ".env").write_text("NEXUSFIX_SCAN_METHOD=iq-cli\n", encoding="utf-8")
+    (tmp_path / "config.yml").write_text("repos: {}\n", encoding="utf-8")
+
+    assert load_project_config(tmp_path / "config.yml").scan_method == "source-control"

@@ -80,6 +80,28 @@ class ProjectConfig:
 ENV_FILENAMES = (".env.local", ".env")
 
 
+def load_env_files(env_file: Path | None = None) -> None:
+    """Seed os.environ from `.env.local` then `.env` in the current directory.
+
+    Called by BOTH loaders rather than by `load_secrets` alone. Every caller happens to
+    read config.yml first and secrets second, so with the dotenv load living only in
+    `load_secrets`, anything `load_project_config` reads from the environment saw a
+    process environment that `.env` had not been applied to yet — and silently fell back
+    to its config.yml value. A setting exported in the shell worked while the identical
+    setting in `.env` did nothing.
+
+    Safe to call repeatedly: `override=False` means an already-set variable wins, so the
+    precedence (shell, then `.env.local`, then `.env`) holds however often this runs.
+    """
+    if env_file is not None:
+        load_dotenv(dotenv_path=env_file)
+        return
+    for filename in ENV_FILENAMES:
+        candidate = Path.cwd() / filename
+        if candidate.is_file():
+            load_dotenv(dotenv_path=candidate, override=False)
+
+
 def load_secrets(env_file: Path | None = None) -> Secrets:
     """Read configuration from the environment, seeded from `.env.local` then `.env`.
 
@@ -92,13 +114,7 @@ def load_secrets(env_file: Path | None = None) -> Secrets:
     somewhere above the repo. `config.yml` is read from the CWD too, so both now behave
     the same way. Pass `env_file` to load one specific file instead.
     """
-    if env_file is not None:
-        load_dotenv(dotenv_path=env_file)
-    else:
-        for filename in ENV_FILENAMES:
-            candidate = Path.cwd() / filename
-            if candidate.is_file():
-                load_dotenv(dotenv_path=candidate, override=False)
+    load_env_files(env_file)
 
     workspace_root = os.environ.get("NEXUSFIX_WORKSPACE_ROOT", str(Path.home() / "nfx"))
     return Secrets(
@@ -115,6 +131,9 @@ def load_secrets(env_file: Path | None = None) -> Secrets:
 
 
 def load_project_config(path: Path) -> ProjectConfig:
+    # Before reading anything, because several settings below fall back to os.environ and
+    # every caller loads this file before it loads secrets. See `load_env_files`.
+    load_env_files()
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     toolchains = data.get("toolchains") or {}
     return ProjectConfig(

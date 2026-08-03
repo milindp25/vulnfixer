@@ -729,10 +729,19 @@ def _scan_for_report(
     here so they cannot disagree about method — see `_require_matching_scan_method`.
     """
     if not config.uses_iq_cli:
+        # Names the setting and its resolved value, not just the outcome. Asking for the
+        # CLI and getting the API is the confusing failure here, and "scan_method=''"
+        # says the setting never arrived, which is a different problem from it arriving
+        # and being overruled.
         log.info(
-            "%s scan: source control evaluation of %s (set iq_cli_jar in config.yml to "
-            "scan built artifacts instead, which is the only way to see transitive "
-            "dependencies for Maven and Gradle)", label, branch,
+            "%s scan: SOURCE CONTROL evaluation of %s  [scan_method=%r iq_cli_jar=%r "
+            "iq_cli_download_url=%r]", label, branch, config.scan_method,
+            config.iq_cli_jar, config.iq_cli_download_url,
+        )
+        log.info(
+            "  reading the committed manifest, so for Maven/Gradle only DIRECT "
+            "dependencies are visible. Set NEXUSFIX_IQ_CLI_URL (or NEXUSFIX_SCAN_METHOD="
+            "iq-cli) to scan built artifacts instead."
         )
         status_url = iq_client.start_source_control_evaluation(
             internal_id, branch, config.default_stage_id

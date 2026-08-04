@@ -254,7 +254,7 @@ def test_run_state_carries_the_findings_so_a_run_id_is_enough(tmp_path):
     assert reloaded["findings"][0]["pulled_in_by"] == ["pkg:npm/parent@1.0"]
 
 
-# --- contract / integration tests the repo defines outside `test` ----------------------
+# --- contract tests the repo defines outside `test` -----------------------------------
 
 def _check_args(tmp_path, **overrides):
     base = dict(
@@ -266,103 +266,120 @@ def _check_args(tmp_path, **overrides):
     return base
 
 
+def _clean_diff():
+    from nexus_autofix.verify import diff as diff_mod
+
+    return diff_mod.DiffResult(
+        classification=diff_mod.DiffClass.MANIFEST_ONLY,
+        changed_files=["build.gradle"], suspicious_reasons=[],
+    )
+
+
 def _passing(*_a, **_k):
     from nexus_autofix.verify.commands import CommandResult
     return CommandResult(0, "", "")
 
 
-def test_contract_test_tasks_are_discovered_and_run(tmp_path):
-    """A bump that breaks a consumer contract otherwise reaches a clean verdict."""
+def test_contract_tests_are_off_unless_the_repo_asks(tmp_path):
+    """Whether they can run outside CI is a property of the repo, not an assumption."""
     from unittest.mock import patch
 
     from nexus_autofix import agent_api
-    from nexus_autofix.verify import diff as diff_mod
 
-    clean = diff_mod.DiffResult(
-        classification=diff_mod.DiffClass.MANIFEST_ONLY,
-        changed_files=["build.gradle"], suspicious_reasons=[],
-    )
-    with patch.object(agent_api.diff_mod, "classify_diff", return_value=clean), \
-            patch.object(agent_api.commands_mod, "run_command", side_effect=_passing) as run, \
-            patch.object(agent_api.commands_mod, "discover_extra_test_tasks",
-                         return_value=["contractTestConsumer", "contractTestProvider"]):
+    with patch.object(agent_api.diff_mod, "classify_diff", return_value=_clean_diff()), \
+            patch.object(agent_api.commands_mod, "run_command", side_effect=_passing), \
+            patch.object(agent_api.commands_mod, "discover_contract_test_tasks") as discover:
         result = agent_api.check_worktree(**_check_args(tmp_path))
 
     assert result.ok is True
-    assert result.extra_test_tasks == ["contractTestConsumer", "contractTestProvider"]
-    assert result.extra_tests_ok is True
-    last = run.call_args.args[0]
-    assert last[-2:] == ["contractTestConsumer", "contractTestProvider"]
-    assert "contractTestConsumer" in result.message
+    assert result.contract_test_tasks == []
+    discover.assert_not_called()
 
 
-def test_a_failing_contract_test_fails_the_check(tmp_path):
+def test_both_consumer_and_provider_contract_tests_run_in_one_invocation(tmp_path):
     from unittest.mock import patch
 
     from nexus_autofix import agent_api
-    from nexus_autofix.verify import diff as diff_mod
+
+    with patch.object(agent_api.diff_mod, "classify_diff", return_value=_clean_diff()), \
+            patch.object(agent_api.commands_mod, "run_command", side_effect=_passing) as run, \
+            patch.object(agent_api.commands_mod, "discover_contract_test_tasks",
+                         return_value=["contractTestConsumer", "contractTestProvider"]):
+        result = agent_api.check_worktree(
+            **_check_args(tmp_path, run_contract_tests=True)
+        )
+
+    assert result.ok is True
+    assert result.contract_test_tasks == ["contractTestConsumer", "contractTestProvider"]
+    assert result.contract_tests_ok is True
+    assert run.call_args.args[0][-2:] == ["contractTestConsumer", "contractTestProvider"]
+
+
+def test_a_failing_contract_test_fails_the_check_distinctly(tmp_path):
+    """Distinct from test_ok, so a contract failure is not mistaken for a unit failure."""
+    from unittest.mock import patch
+
+    from nexus_autofix import agent_api
     from nexus_autofix.verify.commands import CommandResult
 
-    clean = diff_mod.DiffResult(
-        classification=diff_mod.DiffClass.MANIFEST_ONLY,
-        changed_files=["build.gradle"], suspicious_reasons=[],
-    )
     calls = {"n": 0}
 
     def run(cmd, *_a, **_k):
         calls["n"] += 1
-        # 1 = build, 2 = test, 3 = the extra tasks
         return CommandResult(1, "pact verification failed", "") if calls["n"] == 3 \
             else CommandResult(0, "", "")
 
-    with patch.object(agent_api.diff_mod, "classify_diff", return_value=clean), \
+    with patch.object(agent_api.diff_mod, "classify_diff", return_value=_clean_diff()), \
             patch.object(agent_api.commands_mod, "run_command", side_effect=run), \
-            patch.object(agent_api.commands_mod, "discover_extra_test_tasks",
+            patch.object(agent_api.commands_mod, "discover_contract_test_tasks",
                          return_value=["contractTestProvider"]):
-        result = agent_api.check_worktree(**_check_args(tmp_path))
+        result = agent_api.check_worktree(
+            **_check_args(tmp_path, run_contract_tests=True)
+        )
 
     assert result.ok is False
     assert result.build_ok is True and result.test_ok is True
-    assert result.extra_tests_ok is False
-    assert "pact verification failed" in result.extra_test_output_tail
-    # The remedy must not be "delete the failing test".
-    assert "do NOT modify or delete the tests" in result.message.replace("\n", " ")
+    assert result.contract_tests_ok is False
+    assert "pact verification failed" in result.contract_test_output_tail
+    assert "Do NOT modify or delete the contract tests" in result.message
 
 
-def test_extra_tests_can_be_turned_off_for_a_repo(tmp_path):
-    """For contract tests that need a broker or a provider not reachable from here."""
+def test_an_explicit_command_is_used_instead_of_discovery(tmp_path):
+    """For an ecosystem whose contract tests are a script name of the repo's choosing."""
     from unittest.mock import patch
 
     from nexus_autofix import agent_api
-    from nexus_autofix.verify import diff as diff_mod
 
-    clean = diff_mod.DiffResult(
-        classification=diff_mod.DiffClass.MANIFEST_ONLY,
-        changed_files=["build.gradle"], suspicious_reasons=[],
-    )
-    with patch.object(agent_api.diff_mod, "classify_diff", return_value=clean), \
-            patch.object(agent_api.commands_mod, "run_command", side_effect=_passing), \
-            patch.object(agent_api.commands_mod, "discover_extra_test_tasks") as discover:
-        result = agent_api.check_worktree(**_check_args(tmp_path, run_extra_tests=False))
+    with patch.object(agent_api.diff_mod, "classify_diff", return_value=_clean_diff()), \
+            patch.object(agent_api.commands_mod, "run_command", side_effect=_passing) as run, \
+            patch.object(agent_api.commands_mod, "discover_contract_test_tasks") as discover:
+        result = agent_api.check_worktree(**_check_args(
+            tmp_path, ecosystem="yarn", run_contract_tests=True,
+            contract_test_command=["yarn", "test:contract"],
+        ))
 
     assert result.ok is True
-    assert result.extra_test_tasks == []
+    assert result.contract_tests_ok is True
     discover.assert_not_called()
+    assert run.call_args.args[0][-1] == "test:contract"
 
 
-def test_a_node_repo_does_not_get_a_gradle_task_listing(tmp_path):
+def test_a_non_gradle_repo_without_a_command_warns_rather_than_silently_skipping(
+    tmp_path, caplog
+):
+    """Otherwise `run_contract_tests: true` reads as coverage that is not happening."""
+    import logging
     from unittest.mock import patch
 
     from nexus_autofix import agent_api
-    from nexus_autofix.verify import diff as diff_mod
 
-    clean = diff_mod.DiffResult(
-        classification=diff_mod.DiffClass.MANIFEST_ONLY,
-        changed_files=["package.json"], suspicious_reasons=[],
-    )
-    with patch.object(agent_api.diff_mod, "classify_diff", return_value=clean), \
-            patch.object(agent_api.commands_mod, "run_command", side_effect=_passing), \
-            patch.object(agent_api.commands_mod, "discover_extra_test_tasks") as discover:
-        agent_api.check_worktree(**_check_args(tmp_path, ecosystem="yarn"))
+    with caplog.at_level(logging.WARNING, logger="nexus_autofix.agent_api"), \
+            patch.object(agent_api.diff_mod, "classify_diff", return_value=_clean_diff()), \
+            patch.object(agent_api.commands_mod, "run_command", side_effect=_passing):
+        result = agent_api.check_worktree(**_check_args(
+            tmp_path, ecosystem="yarn", run_contract_tests=True,
+        ))
 
-    discover.assert_not_called()
+    assert result.ok is True
+    assert result.contract_test_tasks == []
+    assert "contract_test_command" in caplog.text

@@ -1,12 +1,12 @@
-"""Discovery of contract/integration test tasks a plain `gradlew test` does not run."""
+"""Discovery of the contract-test tasks a plain `gradlew test` does not run."""
 
 from pathlib import Path
 from unittest.mock import patch
 
 from nexus_autofix.verify.commands import (
     CommandResult,
-    _is_runnable_test_task,
-    discover_extra_test_tasks,
+    _is_contract_test_task,
+    discover_contract_test_tasks,
     parse_gradle_tasks,
 )
 
@@ -44,9 +44,9 @@ compileContractTestConsumerJava - Compiles contract test consumer Java source.
 """
 
 
-def test_the_two_contract_test_tasks_are_selected():
+def test_both_the_consumer_and_the_provider_contract_tests_are_selected():
     pairs = parse_gradle_tasks(REAL_OUTPUT)
-    selected = [task for section, task in pairs if _is_runnable_test_task(section, task)]
+    selected = [task for section, task in pairs if _is_contract_test_task(section, task)]
 
     assert selected == ["contractTestConsumer", "contractTestProvider"]
 
@@ -55,23 +55,23 @@ def test_the_classes_tasks_are_never_selected():
     """They compile the contract tests. Running one proves nothing and passes, which
     turns "we now run your contract tests" into a no-op that looks like coverage."""
     for task in ("contractTestConsumerClasses", "contractTestProviderClasses", "testClasses"):
-        assert _is_runnable_test_task("build", task) is False
+        assert _is_contract_test_task("build", task) is False
 
 
 def test_compile_tasks_are_never_selected():
-    assert _is_runnable_test_task("other", "compileContractTestConsumerJava") is False
+    assert _is_contract_test_task("other", "compileContractTestConsumerJava") is False
 
 
 def test_test_and_check_are_not_re_run():
     """`test` is the main command; `check` would re-run it plus everything else."""
     for task in ("test", "check", "build"):
-        assert _is_runnable_test_task("verification", task) is False
+        assert _is_contract_test_task("verification", task) is False
 
 
 def test_linters_under_verification_are_not_run_as_tests():
     """checkstyle and jacoco are the repo's own build policy, not this tool's business."""
     for task in ("checkstyleMain", "jacocoTestReport", "spotbugsMain", "pmdMain"):
-        assert _is_runnable_test_task("verification", task) is False
+        assert _is_contract_test_task("verification", task) is False
 
 
 def test_an_ungrouped_contract_task_is_still_found():
@@ -83,18 +83,16 @@ Other tasks
 contractTest - Consumer-driven contract tests
 """
     pairs = parse_gradle_tasks(output)
-    assert [t for s, t in pairs if _is_runnable_test_task(s, t)] == ["contractTest"]
+    assert [t for s, t in pairs if _is_contract_test_task(s, t)] == ["contractTest"]
 
 
-def test_a_repo_specific_test_name_under_verification_is_picked_up():
-    """Names this list has not seen, filed by Gradle as verification."""
-    output = """
-Verification tasks
-------------------
-smokeTest - Runs the smoke tests
-"""
-    pairs = parse_gradle_tasks(output)
-    assert [t for s, t in pairs if _is_runnable_test_task(s, t)] == ["smokeTest"]
+def test_integration_and_other_broad_tests_are_NOT_run():
+    """Contract tests are self-contained; these need the other systems up, so running
+    them from a developer machine fails for reasons unrelated to the dependency change.
+    A red check nobody believes is worse than no check."""
+    for task in ("integrationTest", "componentTest", "e2eTest", "acceptanceTest",
+                 "smokeTest", "apiTest", "systemTest"):
+        assert _is_contract_test_task("verification", task) is False, task
 
 
 def test_a_non_test_task_under_verification_is_left_alone():
@@ -104,7 +102,7 @@ Verification tasks
 dependencyCheckAnalyze - Scans dependencies
 """
     pairs = parse_gradle_tasks(output)
-    assert [t for s, t in pairs if _is_runnable_test_task(s, t)] == []
+    assert [t for s, t in pairs if _is_contract_test_task(s, t)] == []
 
 
 def test_section_headings_and_rules_are_not_read_as_tasks():
@@ -121,7 +119,7 @@ lib:contractTestConsumer - Runs them
 """
     with patch("nexus_autofix.verify.commands.run_command",
                return_value=CommandResult(0, output, "")):
-        tasks = discover_extra_test_tasks(Path("/repo"), {}, 60)
+        tasks = discover_contract_test_tasks(Path("/repo"), {}, 60)
 
     assert tasks == ["app:contractTestConsumer", "lib:contractTestConsumer"]
 
@@ -133,7 +131,7 @@ def test_a_failed_task_listing_degrades_to_running_nothing_extra(caplog):
     with caplog.at_level(logging.WARNING, logger="nexus_autofix.verify.commands"), \
             patch("nexus_autofix.verify.commands.run_command",
                   return_value=CommandResult(1, "", "boom")):
-        tasks = discover_extra_test_tasks(Path("/repo"), {}, 60)
+        tasks = discover_contract_test_tasks(Path("/repo"), {}, 60)
 
     assert tasks == []
     assert "will not be run" in caplog.text

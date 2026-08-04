@@ -1140,7 +1140,8 @@ def check_command(run_id: str, verbose: bool):
         base_ref=state["commit_sha"],
         # .get: a run.json written before this existed has no app_id, and an older run
         # should still be checkable rather than crashing on a missing key.
-        run_extra_tests=config.run_extra_tests_for(state.get("app_id", "")),
+        run_contract_tests=config.run_contract_tests_for(state.get("app_id", "")),
+        contract_test_command=config.contract_test_command_for(state.get("app_id", "")),
     )
     agent_api.write_verdict(run_dir, result)
     _agent_json(asdict(result))

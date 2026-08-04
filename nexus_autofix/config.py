@@ -69,10 +69,10 @@ class ProjectConfig:
     java_executable: str = "java"
     #: "iq-cli", "source-control", or "" to decide from whether a jar/URL is configured.
     scan_method: str = ""
-    #: Run contract/integration test tasks the repo defines outside `test`. On by
-    #: default: a bump that breaks a consumer contract otherwise reports a clean run.
-    #: Turn off per repo when those tests need infrastructure not reachable from here.
-    run_extra_tests: bool = True
+    #: Run the repo's contract tests as part of `check`. OFF by default and turned on
+    #: per repo, because whether they can run outside CI is a property of the repo — a
+    #: provider test needing a broker fails here for reasons unrelated to the change.
+    run_contract_tests: bool = False
 
     def scan_targets_for(self, app_id: str) -> tuple[str, ...]:
         """Scan target(s) for one application, or () to derive them from the ecosystem.
@@ -94,15 +94,23 @@ class ProjectConfig:
         violations if scanned at `build`."""
         return str((self.repo_settings.get(app_id) or {}).get("stage_id") or self.default_stage_id)
 
-    def run_extra_tests_for(self, app_id: str) -> bool:
-        """Whether to run this repo's contract/integration test tasks.
+    def run_contract_tests_for(self, app_id: str) -> bool:
+        """Whether to run this repo's contract tests during `check`."""
+        override = (self.repo_settings.get(app_id) or {}).get("run_contract_tests")
+        return self.run_contract_tests if override is None else bool(override)
 
-        Per repo, because whether they can run outside CI is a property of the repo: a
-        Pact provider test needing a broker will fail here for reasons that have nothing
-        to do with the dependency change.
+    def contract_test_command_for(self, app_id: str) -> list[str]:
+        """An explicit contract-test command for this repo, if discovery cannot find one.
+
+        Gradle names its tasks, so they can be discovered. Nothing else does: an npm
+        contract test is a script in package.json whose name is whatever the repo chose,
+        and guessing between `test:contract`, `test:pact` and `contract-test` would run
+        the wrong thing or nothing. Stated rather than inferred.
         """
-        override = (self.repo_settings.get(app_id) or {}).get("run_extra_tests")
-        return self.run_extra_tests if override is None else bool(override)
+        raw = (self.repo_settings.get(app_id) or {}).get("contract_test_command") or ""
+        if isinstance(raw, (list, tuple)):
+            return [str(part) for part in raw]
+        return shlex.split(str(raw)) if str(raw).strip() else []
 
     def prescan_command_for(self, app_id: str) -> list[str]:
         """Command to run in the checkout before scanning, if this repo needs one.
@@ -258,5 +266,5 @@ def load_project_config(path: Path) -> ProjectConfig:
         ),
         java_executable=str(data.get("java_executable") or "java"),
         scan_method=os.environ.get("NEXUSFIX_SCAN_METHOD") or str(data.get("scan_method") or ""),
-        run_extra_tests=bool(data.get("run_extra_tests", True)),
+        run_contract_tests=bool(data.get("run_contract_tests", False)),
     )

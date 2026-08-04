@@ -178,24 +178,34 @@ wrote, and re-reads the diff — if the worktree changed since, what would be pu
 what was verified, and it stops. The party asking to publish is the same one that made the
 changes, so its own assurance is worth nothing.
 
-**Contract and integration tests.** A Gradle repo often registers these as their own
-tasks — `contractTestConsumer`, `contractTestProvider`, `integrationTest`, `pactVerify` —
-wired into neither `test` nor `check`. Nothing would run them, so a bump that breaks a
-consumer contract would reach a clean verdict. `check` lists the repo's tasks, picks out
-the ones that are tests, and runs them after the unit tests; they appear in the verdict as
-`extra_test_tasks`. The `*Classes` tasks that merely *compile* them are excluded — running
-one proves nothing and passes.
-
-See what a repo has with `./gradlew tasks --all` (`--group verification` and
-`check --dry-run` both miss an ungrouped task). Turn it off where those tests need a broker
-or a provider that isn't reachable from your machine:
+**Contract tests.** A Gradle repo often registers these as their own tasks —
+`contractTestConsumer`, `contractTestProvider`, `pactVerify` — wired into neither `test`
+nor `check`, so nothing runs them. A dependency bump can change a serialised payload and
+break a consumer contract without a single unit test noticing. Turn them on per repo:
 
 ```yaml
 repos:
-  java-svc:
-    url: https://github.com/org/java-svc.git
-    run_extra_tests: false
+  java-api:
+    url: https://github.com/org/java-api.git
+    run_contract_tests: true                      # discovers the Gradle tasks
+
+  react-app:
+    url: https://github.com/org/react-app.git
+    run_contract_tests: true
+    contract_test_command: yarn test:contract     # npm has no discoverable task name
 ```
+
+`check` then runs them after the unit tests and reports `contract_test_tasks` /
+`contract_tests_ok` in the verdict, separately from `test_ok`.
+
+**Only contract tests** — not `integrationTest`, `e2eTest`, `componentTest` or
+`smokeTest`. Contract tests are self-contained, so they run here as they do in CI; the
+others need the surrounding systems up and would fail for reasons that have nothing to do
+with the dependency change. The `*Classes` tasks are excluded too — those *compile* the
+contract tests, so running one proves nothing and passes.
+
+Off by default. See what a repo has with `./gradlew tasks --all` (`--group verification`
+and `check --dry-run` both miss an ungrouped task).
 
 **Which branches:** the branch you pass to `discover` is resolved to a commit SHA, that
 exact SHA is what IQ scans and what the checkout is made at, and it's the branch the PR

@@ -116,11 +116,12 @@ This classifies the diff, then runs the real build and tests. It prints:
   changes. Do not try to work around the check.
 - `ok: false` with `build_ok: false` or `test_ok: false` → read the output tail, fix the
   dependency change, and run `check` again. Fix the *change*, not the tests.
-- `ok: false` with `extra_tests_ok: false` → the unit tests passed but a contract or
-  integration test this repo defines outside `test` (listed in `extra_test_tasks`) did
-  not. Treat it exactly like a test failure: fix the dependency change. If it fails
-  because it needs a broker or a provider that is not reachable from here rather than
-  because of your change, say so and stop — **do not modify or delete the test.**
+- `ok: false` with `contract_tests_ok: false` → the unit tests passed but this repo's
+  contract tests (listed in `contract_test_tasks`) did not. A bump can change a
+  serialised payload and break a consumer contract without any unit test noticing, so
+  this is a real failure: fix the dependency change. **Do not modify or delete the
+  contract tests.** If they fail because a broker or provider is unreachable from here
+  rather than because of your change, say so and stop.
 
 Repeat step 2 and step 3 until `ok` is true. If you cannot get there after a few
 attempts, stop and report what failed — do not force it through.

@@ -96,6 +96,11 @@ class CheckResult:
     build_output_tail: str | None = None
     test_ok: bool | None = None
     test_output_tail: str | None = None
+    #: Contract / integration test tasks found in the repo and run after `test`.
+    #: Empty means none were found — NOT that none exist, if discovery failed.
+    extra_test_tasks: list[str] = field(default_factory=list)
+    extra_tests_ok: bool | None = None
+    extra_test_output_tail: str | None = None
     message: str = ""
 
 
@@ -109,6 +114,7 @@ def check_worktree(
     timeout_seconds: int,
     env: dict[str, str],
     base_ref: str = "HEAD",
+    run_extra_tests: bool = True,
 ) -> CheckResult:
     """Classify the diff, then build and test — in that order, and stopping early.
 
@@ -176,9 +182,44 @@ def check_worktree(
             ),
         )
 
+    # A repo can register contract, integration or Pact tests as tasks wired into neither
+    # `test` nor `check`. Nothing above runs them, so a bump that breaks a consumer
+    # contract reaches here reporting a clean result. Discovered per repo rather than
+    # configured, because which of these exist differs from repo to repo.
+    extra_tasks: list[str] = []
+    if run_extra_tests and ecosystem == "gradle":
+        extra_tasks = commands_mod.discover_extra_test_tasks(worktree, env, timeout_seconds)
+
+    if not extra_tasks:
+        return CheckResult(
+            ok=True, **base, build_ok=True, test_ok=True,
+            message="build and tests pass, and the diff contains only dependency changes",
+        )
+
+    log.info("running %d extra test task(s): %s", len(extra_tasks), ", ".join(extra_tasks))
+    extra_cmd = [commands_mod._gradle_executable(worktree), *extra_tasks]
+    extra = commands_mod.run_command(extra_cmd, worktree, env, timeout_seconds)
+    if not extra.success:
+        return CheckResult(
+            ok=False, **base, build_ok=True, test_ok=True,
+            extra_test_tasks=extra_tasks, extra_tests_ok=False,
+            extra_test_output_tail=extra.tail(),
+            message=(
+                f"the unit tests pass but {' '.join(extra_tasks)} failed. These are "
+                "contract or integration tests this repo defines outside `test`. If they "
+                "need infrastructure that is not reachable from here rather than being "
+                "broken by the change, re-run with extra tests disabled — do NOT modify "
+                "or delete the tests."
+            ),
+        )
+
     return CheckResult(
         ok=True, **base, build_ok=True, test_ok=True,
-        message="build and tests pass, and the diff contains only dependency changes",
+        extra_test_tasks=extra_tasks, extra_tests_ok=True,
+        message=(
+            "build and tests pass, and the diff contains only dependency changes"
+            + (f" (including {', '.join(extra_tasks)})" if extra_tasks else "")
+        ),
     )
 
 

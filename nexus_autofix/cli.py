@@ -1138,6 +1138,9 @@ def check_command(run_id: str, verbose: bool):
         timeout_seconds=config.subprocess_timeout_seconds,
         env=dict(os.environ),
         base_ref=state["commit_sha"],
+        # .get: a run.json written before this existed has no app_id, and an older run
+        # should still be checkable rather than crashing on a missing key.
+        run_extra_tests=config.run_extra_tests_for(state.get("app_id", "")),
     )
     agent_api.write_verdict(run_dir, result)
     _agent_json(asdict(result))

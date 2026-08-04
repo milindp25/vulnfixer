@@ -165,7 +165,7 @@ and nothing has left your machine.
 | Command | What it does | Remote? |
 |---|---|---|
 | `discover` | Scans in IQ, resolves target versions, prepares the checkout, writes `run.json`. | No |
-| `check` | Refuses a diff that disables tests, waives a policy, hand-edits a lockfile or downgrades — **before** building. Then runs the real build and tests, and records the verdict. | No |
+| `check` | Refuses a diff that disables tests, waives a policy, hand-edits a lockfile or downgrades — **before** building. Then runs the real build and tests, and records the verdict. On Gradle it also finds and runs contract/integration test tasks the repo defines outside `test`. | No |
 | `publish` | Commits, pushes, rescans in IQ. Refuses without a passing `check`. Deletes the pushed branch if the rescan shows the findings are still there. | Yes |
 | `remediate <component>` | Asks IQ what version of one component clears the policy. For a component that never reached the report — typically a quarantined transitive dependency. | No |
 | `gc` | Deletes stale `autofix/nexus/*` branches with no open PR. | Yes |
@@ -177,6 +177,25 @@ CLI directly. It needs unattended agent runs to be permitted in your org.
 wrote, and re-reads the diff — if the worktree changed since, what would be pushed isn't
 what was verified, and it stops. The party asking to publish is the same one that made the
 changes, so its own assurance is worth nothing.
+
+**Contract and integration tests.** A Gradle repo often registers these as their own
+tasks — `contractTestConsumer`, `contractTestProvider`, `integrationTest`, `pactVerify` —
+wired into neither `test` nor `check`. Nothing would run them, so a bump that breaks a
+consumer contract would reach a clean verdict. `check` lists the repo's tasks, picks out
+the ones that are tests, and runs them after the unit tests; they appear in the verdict as
+`extra_test_tasks`. The `*Classes` tasks that merely *compile* them are excluded — running
+one proves nothing and passes.
+
+See what a repo has with `./gradlew tasks --all` (`--group verification` and
+`check --dry-run` both miss an ungrouped task). Turn it off where those tests need a broker
+or a provider that isn't reachable from your machine:
+
+```yaml
+repos:
+  java-svc:
+    url: https://github.com/org/java-svc.git
+    run_extra_tests: false
+```
 
 **Which branches:** the branch you pass to `discover` is resolved to a commit SHA, that
 exact SHA is what IQ scans and what the checkout is made at, and it's the branch the PR

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import time
@@ -72,6 +73,102 @@ BUILD_COMMANDS: dict[str, Callable[[Path], list[str]]] = {
     "yarn": lambda root: ["yarn", "install", "--frozen-lockfile"],
     "pnpm": lambda root: ["pnpm", "install", "--frozen-lockfile"],
 }
+
+#: Task-name fragments that mark a test a plain `gradlew test` does not run. Matched
+#: case-insensitively against the task name.
+_EXTRA_TEST_MARKERS = (
+    "contracttest", "contracttests", "pact", "integrationtest", "integrationtests",
+    "componenttest", "e2etest", "acceptancetest", "apitest",
+)
+
+#: Never run these even when the name matches. `contractTestConsumerClasses` COMPILES the
+#: contract tests and is a Build task, not a Verification one — running it proves nothing
+#: and reports success. Getting this wrong turns "we now run your contract tests" into a
+#: no-op that looks like coverage.
+_NOT_A_TEST_PREFIXES = ("compile", "process", "clean", "generate", "extract")
+_NOT_A_TEST_SUFFIXES = ("classes", "jar", "sources", "javadoc", "report", "reports")
+
+#: Already covered: `test` is the main test command, and `check` would re-run it plus
+#: everything else, doubling the work.
+_ALREADY_RUN = {"test", "check", "build"}
+
+_TASK_LINE = re.compile(r"^([A-Za-z][\w.:'-]*)(?:\s+-\s+(.*))?$")
+_SECTION_LINE = re.compile(r"^(.+) tasks$")
+
+
+def parse_gradle_tasks(output: str) -> list[tuple[str, str]]:
+    """Parse `gradlew tasks --all` into (section, task_name) pairs.
+
+    Sections matter: a repo's contract tests are normally registered under `verification`,
+    while the tasks that merely COMPILE them sit under `build` with names one character
+    away. Keeping the section lets those be told apart by where Gradle filed them rather
+    than by guessing from the name.
+    """
+    pairs: list[tuple[str, str]] = []
+    section = ""
+    for raw in output.splitlines():
+        line = raw.rstrip()
+        if not line or set(line) <= {"-", "="}:
+            continue
+        heading = _SECTION_LINE.match(line.strip())
+        if heading:
+            section = heading.group(1).strip().lower()
+            continue
+        if line.startswith(" "):
+            continue
+        match = _TASK_LINE.match(line.strip())
+        if match and section:
+            pairs.append((section, match.group(1)))
+    return pairs
+
+
+def _is_runnable_test_task(section: str, task: str) -> bool:
+    name = task.split(":")[-1]
+    lowered = name.lower()
+    if lowered in _ALREADY_RUN:
+        return False
+    if lowered.startswith(_NOT_A_TEST_PREFIXES) or lowered.endswith(_NOT_A_TEST_SUFFIXES):
+        return False
+    if any(marker in lowered for marker in _EXTRA_TEST_MARKERS):
+        return True
+    # A task filed under verification whose name still says "test" — a repo-specific
+    # naming this list has not seen. Anything else under verification (checkstyle, jacoco,
+    # spotbugs) is a linter, not a test, and is left to the repo's own build to enforce.
+    return section.startswith("verification") and "test" in lowered
+
+
+def discover_extra_test_tasks(
+    root: Path, env: dict[str, str], timeout_seconds: int
+) -> list[str]:
+    """Ask Gradle which test tasks exist beyond `test`.
+
+    A repo can register contract, integration or Pact tests as standalone tasks that are
+    wired into neither `test` nor `check`, in which case nothing in a normal verify run
+    executes them and a dependency bump that breaks a consumer contract still reports a
+    clean result. `tasks --all` is the only listing that shows them: one that is
+    ungrouped appears under "Other tasks", where both `check --dry-run` and
+    `tasks --group verification` miss it.
+
+    Returns [] on any failure. This is an enhancement to verification, so it must never
+    be the reason a run cannot proceed.
+    """
+    result = run_command(
+        [_gradle_executable(root), "tasks", "--all", "--quiet"], root, env, timeout_seconds
+    )
+    if not result.success:
+        log.warning(
+            "could not list Gradle tasks, so any contract or integration test tasks in "
+            "this repo will not be run: exit %s", result.returncode,
+        )
+        return []
+    tasks = [
+        task for section, task in parse_gradle_tasks(result.stdout)
+        if _is_runnable_test_task(section, task)
+    ]
+    # Deterministic order, and de-duplicated: a multi-project build lists the same task
+    # name under each subproject.
+    return sorted(dict.fromkeys(tasks))
+
 
 TEST_COMMANDS: dict[str, Callable[[Path], list[str]]] = {
     "gradle": lambda root: [_gradle_executable(root), "test"],

@@ -116,6 +116,11 @@ This classifies the diff, then runs the real build and tests. It prints:
   changes. Do not try to work around the check.
 - `ok: false` with `build_ok: false` or `test_ok: false` → read the output tail, fix the
   dependency change, and run `check` again. Fix the *change*, not the tests.
+- `ok: false` with `extra_tests_ok: false` → the unit tests passed but a contract or
+  integration test this repo defines outside `test` (listed in `extra_test_tasks`) did
+  not. Treat it exactly like a test failure: fix the dependency change. If it fails
+  because it needs a broker or a provider that is not reachable from here rather than
+  because of your change, say so and stop — **do not modify or delete the test.**
 
 Repeat step 2 and step 3 until `ok` is true. If you cannot get there after a few
 attempts, stop and report what failed — do not force it through.

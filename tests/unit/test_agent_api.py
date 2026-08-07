@@ -383,3 +383,65 @@ def test_a_non_gradle_repo_without_a_command_warns_rather_than_silently_skipping
     assert result.ok is True
     assert result.contract_test_tasks == []
     assert "contract_test_command" in caplog.text
+
+
+def _nanoid():
+    from nexus_autofix.iq.models import Finding
+
+    return Finding(
+        component="nanoid", package_url="pkg:npm/nanoid@3.3.7", current_version="3.3.7",
+        target_version="5.0.9", remediation_type="next-no-violations", is_direct=False,
+        dependency_path=["pkg:npm/postcss@8.4.31"], parent_component=None,
+        parent_current_version=None, parent_target_version=None, threat_level=9,
+        policy_name="Security-Critical", cve_ids=["CVE-2024-55565"],
+    )
+
+
+def test_a_major_bump_reaches_the_agent_as_not_actionable():
+    """Regression: `discover` used to hand major jumps over as work to do.
+
+    `filter_findings` escalates a MAJOR, but that call lived only in the orchestrator, so
+    the agent-driven path built run.json straight from the raw findings. `is_actionable` is
+    just `bool(target_version)`, which is true for 3.3.7 -> 5.0.9 — so run.json said
+    `actionable: true` and the RUNBOOK says to use target_version exactly. The agent was
+    doing what it was told.
+    """
+    from nexus_autofix.agent_api import finding_views
+    from nexus_autofix.cli import _escalation_reason
+    from nexus_autofix.iq.filter import filter_findings
+
+    filtered = filter_findings([_nanoid()], suppressed_components=set(), min_threat_level=8)
+    assert not filtered.actionable and len(filtered.escalate) == 1
+
+    reasons = {f.package_url: _escalation_reason(f) for f in filtered.escalate}
+    view = finding_views(filtered.escalate, 8, reasons)[0]
+
+    assert view.actionable is False
+    assert view.needs_approval is True, "a human must be able to release it"
+    assert "crosses a major version" in view.reason_not_actionable
+    # The version IQ suggested stays visible so the agent can investigate it.
+    assert view.target_version == "5.0.9"
+
+
+def test_a_finding_with_no_target_version_is_not_approvable():
+    from dataclasses import replace
+
+    from nexus_autofix.agent_api import finding_views
+
+    view = finding_views([replace(_nanoid(), target_version=None)], 8)[0]
+    assert view.actionable is False
+    assert view.needs_approval is False, "no version to approve at any price"
+
+
+def test_an_ordinary_patch_bump_is_untouched_by_the_gate():
+    from dataclasses import replace
+
+    from nexus_autofix.agent_api import finding_views
+    from nexus_autofix.iq.filter import filter_findings
+
+    patch = replace(_nanoid(), current_version="3.3.7", target_version="3.3.8")
+    filtered = filter_findings([patch], suppressed_components=set(), min_threat_level=8)
+
+    assert len(filtered.actionable) == 1
+    view = finding_views(filtered.actionable, 8, {})[0]
+    assert view.actionable is True and view.needs_approval is False

@@ -57,7 +57,7 @@ NEXUSFIX_WORKSPACE_ROOT=C:/Users/you/nfx     # also fine, and immune to the abov
 NEXUSFIX_WORKSPACE_ROOT="C:\Users\you\nfx"   # BROKEN — \n becomes a newline
 ```
 
-And `config.yml`, mapping each IQ **public application ID** to its repo:
+And `config.yml`, listing the applications this tool may work on:
 
 ```yaml
 min_threat_level: 8      # only fix threat level 8+ (IQ's Severe/Critical)
@@ -65,6 +65,22 @@ min_threat_level: 8      # only fix threat level 8+ (IQ's Severe/Critical)
 repos:
   boardingwizard-static: https://github.com/your-org/boardingwizard-static.git
 ```
+
+The **key is the name you use everywhere else** — `--app-id`, `NEXUSFIX_APP_ID`, the mirror
+directory, per-repo settings. Call it whatever you call the repo.
+
+Nexus IQ is the one consumer needing its own identifier, and it is often a different
+string. Say so, and nothing else changes:
+
+```yaml
+repos:
+  payments-core:
+    url: https://github.com/your-org/payments-core.git
+    iq_app_id: card-payments-core     # what Nexus IQ calls this application
+```
+
+Then `--app-id payments-core` works while IQ is asked about `card-payments-core`.
+`iq_app_id` defaults to the key, so a config where the two already match needs no change.
 
 Run every command from the directory holding `config.yml` and `.env` — both are read from
 the current directory.
@@ -168,6 +184,9 @@ and nothing has left your machine.
 | `check` | Refuses a diff that disables tests, waives a policy, hand-edits a lockfile or downgrades — **before** building. Then runs the real build and tests, and records the verdict. On Gradle it also finds and runs contract/integration test tasks the repo defines outside `test`. | No |
 | `publish` | Commits, pushes, rescans in IQ. Refuses without a passing `check`. Deletes the pushed branch if the rescan shows the findings are still there. | Yes |
 | `remediate <component>` | Asks IQ what version of one component clears the policy. For a component that never reached the report — typically a quarantined transitive dependency. | No |
+| `appsec-discover` | Everything `discover` does, **plus** the libraries the AppSec SCA worksheet names for this repo. See below. | No |
+| `resolve` | Records which version to use where IQ and the AppSec sheet disagree. | No |
+| `approve` | Releases a finding held back for review — a major version jump, usually. | No |
 | `gc` | Deletes stale `autofix/nexus/*` branches with no open PR. | Yes |
 
 There's also `nexusfix run`, which does everything in one command by calling the Copilot
@@ -210,6 +229,102 @@ and `check --dry-run` both miss an ungrouped task).
 **Which branches:** the branch you pass to `discover` is resolved to a commit SHA, that
 exact SHA is what IQ scans and what the checkout is made at, and it's the branch the PR
 targets. The fix goes on `autofix/nexus/<run-id>`.
+
+---
+
+## Major version jumps
+
+A major bump — `nanoid 3.3.7 -> 5.0.9` — is **not** attempted automatically. It can change
+an API and break whatever depends on the package in ways a passing build does not rule out,
+so it arrives as `"actionable": false` with `"needs_approval": true`, and it stays out of
+`target_purls` so `publish` doesn't expect it to clear.
+
+That's the default, not the end of it. The agent is expected to *investigate* these rather
+than just report them: whether the repo actually uses the affected surface, what the
+changelog says between the two versions, what `pulled_in_by` names as depending on it. It
+gives you a recommendation, and you decide:
+
+```bash
+.venv/bin/nexusfix approve --run-id <run-id> --component nanoid --version 5.0.9
+```
+
+`--version` has to match what Nexus IQ recommended. It confirms *which* change you're
+approving; it never chooses one. The agent can't run `approve` — an agent approving its own
+analysis would mean nothing, which is the same reason `publish` needs a verdict `check`
+wrote.
+
+Say nothing and nothing happens. That's the point of the default.
+
+---
+
+## AppSec findings
+
+Nexus IQ is not the only source of dependency problems. AppSec tracks libraries that are
+**quarantined or about to be flagged** in a Tableau report — findings IQ has not raised as
+policy violations yet, and which no IQ scan can therefore surface. `discover` cannot see
+them: IQ's policy endpoint returns only components carrying a violation, and one that *is*
+flagged below `min_threat_level` is filtered out before the agent sees it.
+
+There is no API between Tableau and this tool, so the data arrives as an exported workbook.
+Download it, then:
+
+```bash
+.venv/bin/nexusfix appsec-discover --sheet ./SCA_Worksheet_data.xlsx
+```
+
+This is `discover` **plus** the AppSec rows — one run, one worktree, one build, one PR.
+Deliberately not a separate run: both sets of changes touch the same manifest, so two runs
+would mean two branches editing the same lines.
+
+Everything after it is unchanged. `check` and `publish` work as they always have, and
+`RUNBOOK.md` needs no new instructions for the ordinary case — an AppSec finding is just a
+finding in `run.json` with `"source": ["appsec"]`.
+
+**Which columns are read.** `GITHUB_ORG` and `GITHUB_REPO_NAME` (matched against your
+`repos:` clone URLs), `LIBRARY_FILENAME`, `VULN_TOPFIX_RESOLUTION`, and optionally
+`LIBRARY_TYPE`, `VULN_NAME`, `DIRECT_DEPENDENCY` and `CVSS3 Score`. Everything is looked up
+**by header name**, so the column order can change freely; only a rename needs
+`appsec.columns` in `config.yml`.
+
+`LIBRARY_NAME` is read for display only. It holds a human label — "Bouncy Castle Provider" —
+which matches neither a groupId nor an artifactId, so all identity comes from
+`LIBRARY_FILENAME`: `bcprov-jdk15on-1.49.jar` is artifact `bcprov-jdk15on` at `1.49`. A
+filename with no version in it (`jtidy-r938.jar`) is reported as unreadable rather than
+guessed at.
+
+**Rows repeat per CVE** — one library commonly fills eight rows — and are folded into a
+single finding carrying every CVE.
+
+### What it will not do on its own
+
+`VULN_TOPFIX_RESOLUTION` is a *list of candidates*, not an answer, and most entries name a
+**different artifact** than the one installed. Four outcomes:
+
+| Outcome | Meaning |
+|---|---|
+| `RESOLVED` | One usable target. Handed to the agent like any other finding. |
+| `CONFLICT` | IQ and the sheet both offer a real upgrade and they differ. **`check` refuses until you settle it.** |
+| `SWAP_ONLY` | Every suggestion is a different artifact — `bcprov-jdk15on` → `bc-fips` is a migration, not a bump. Reported, never applied. |
+| `AMBIGUOUS_GROUP` | The same artifact name under several group ids. `com.fasterxml.jackson.core:jackson-core` and `tools.jackson.core:jackson-core` are different packages, and the filename does not say which is installed. |
+
+For a `CONFLICT`, `check` stops and prints the exact command:
+
+```bash
+.venv/bin/nexusfix resolve --run-id <run-id> --component org.bouncycastle:bcprov-jdk15on --version 1.64
+```
+
+`resolve` accepts **only one of the two versions already proposed**. A third is refused.
+That constraint is the point: the agent can read changelogs and recommend, but it cannot
+launder a version of its own choosing through this command and have it arrive looking like
+your decision. If both candidates are wrong, fix the sheet or escalate.
+
+Nothing IQ says about an AppSec library is taken on trust either — a candidate that is not
+newer than what is installed is discarded, from either source.
+
+**The rescan proves less here, and the run says so.** `publish` confirms a fix by the
+finding disappearing from the IQ report. A library that was never a violation cannot
+disappear from a list it was never on, so for those the IQ rescan is not evidence. The
+build, the tests and the diff classification still are.
 
 ---
 
@@ -269,6 +384,36 @@ code scanned at the wrong stage reports a different set of violations.
 
 `NEXUSFIX_SCAN_METHOD=source-control` forces the API scan back on, which is how to get
 findings when a build is broken.
+
+---
+
+## TLS behind a corporate proxy
+
+If Python fails with `SSLCertVerificationError` where a browser on the same machine is
+fine, the proxy is presenting its own root CA. Best fix is `pip install truststore`, which
+makes Python use the OS trust store with nothing to configure.
+
+Otherwise, instead of `curl`-ing the CA down by hand on every machine, put the URL in
+`.env`:
+
+```bash
+NEXUSFIX_CA_BUNDLE_URL=https://pki.corp.example.com/corporate-root-ca.pem
+NEXUSFIX_CA_BUNDLE_SHA256=<the sha256 the first run logs>
+```
+
+It is fetched once into `<workspace_root>/tools/corporate-ca.pem` and reused; later runs
+make no network call for it. That path is outside any git working tree, so it cannot be
+committed.
+
+**Set the checksum.** That first download *cannot verify the certificate it is fetching* —
+there is no CA to verify with yet, which is the entire problem being solved — so the
+checksum is the only thing establishing that what arrived is your organisation's CA rather
+than one substituted in transit. Every "verified" connection afterwards trusts whatever
+that file contains. Without a checksum it still works and warns loudly, printing the sha256
+to paste back.
+
+A download that returns a proxy sign-in page instead of a certificate is refused rather
+than saved, since that failure otherwise surfaces much later as an unintelligible SSL error.
 
 ---
 

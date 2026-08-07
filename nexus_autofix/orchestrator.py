@@ -38,6 +38,15 @@ class RunConfig:
     node_toolchains: dict[str, str]
     subprocess_timeout_seconds: int
     min_threat_level: int = DEFAULT_MIN_THREAT_LEVEL
+    #: The Nexus IQ public application ID, when it differs from `app_id` — which is the
+    #: config.yml key everything else is filed under. Empty means they are the same, which
+    #: is the common case and what every existing config expresses.
+    iq_app_id: str = ""
+
+    @property
+    def iq_application(self) -> str:
+        """What to call this application when talking to Nexus IQ."""
+        return self.iq_app_id or self.app_id
 
     def __post_init__(self) -> None:
         # An unvalidated gate string is a fail-open: a typo like "pre_push" or
@@ -308,9 +317,13 @@ class Orchestrator:
                 pushed = True
 
                 target_purls = {f.package_url for f in filtered.actionable}
-                baseline_report = self._iq.fetch_policy_report(run_config.app_id, baseline_report_id)
+                baseline_report = self._iq.fetch_policy_report(
+                    run_config.iq_application, baseline_report_id
+                )
                 rescan_report_id = self._rescan_fn(run_config, worktree)
-                rescan_report = self._iq.fetch_policy_report(run_config.app_id, rescan_report_id)
+                rescan_report = self._iq.fetch_policy_report(
+                    run_config.iq_application, rescan_report_id
+                )
                 comparison = rescan_mod.compare_reports(baseline_report, rescan_report, target_purls)
                 log.info("rescan %s: still_failing=%s new_findings=%s",
                          "cleared" if comparison.all_cleared and not comparison.new_findings else "DID NOT CLEAR",

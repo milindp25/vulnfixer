@@ -73,6 +73,14 @@ class ProjectConfig:
     #: per repo, because whether they can run outside CI is a property of the repo — a
     #: provider test needing a broker fails here for reasons unrelated to the change.
     run_contract_tests: bool = False
+    #: Default path to the AppSec (SCA) worksheet, so `appsec-discover` can be run without
+    #: --sheet. A local path only: the export comes from Tableau via SharePoint, and
+    #: fetching it would mean carrying SSO credentials for no gain over downloading it.
+    appsec_sheet: str = ""
+    #: Header overrides for that worksheet, keyed by the internal field name. Only needed
+    #: when a re-export renames a column — the defaults in appsec/sheet.py match the export
+    #: as it stands. Column ORDER never matters; everything is looked up by header text.
+    appsec_columns: dict[str, str] = field(default_factory=dict)
 
     def scan_targets_for(self, app_id: str) -> tuple[str, ...]:
         """Scan target(s) for one application, or () to derive them from the ecosystem.
@@ -87,6 +95,20 @@ class ProjectConfig:
         if override:
             return _scan_targets(override)
         return self.iq_cli_scan_target
+
+    def iq_app_id_for(self, app_key: str) -> str:
+        """The Nexus IQ public application ID for one entry in `repos:`.
+
+        Everything else in this tool is keyed by the name you write in `repos:` — that is
+        what `--app-id` and `NEXUSFIX_APP_ID` take, what the mirror directory is named, and
+        what per-repo settings hang off. Nexus IQ is the one consumer that needs its own
+        identifier, and it is routinely not the same string: a repo called `payments-core`
+        can be `card-payments-core` in IQ.
+
+        Defaults to the key, so a config where the two already match needs no change and
+        keeps working exactly as before.
+        """
+        return str((self.repo_settings.get(app_key) or {}).get("iq_app_id") or app_key)
 
     def stage_id_for(self, app_id: str) -> str:
         """IQ stage for one application. The stage selects which policies apply, so a
@@ -241,6 +263,7 @@ def load_project_config(path: Path) -> ProjectConfig:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     toolchains = data.get("toolchains") or {}
     repos, repo_settings = _parse_repos(data.get("repos"))
+    appsec = data.get("appsec") or {}
     return ProjectConfig(
         subprocess_timeout_seconds=data.get("subprocess_timeout_seconds", 1800),
         max_attempts=data.get("max_attempts", 2),
@@ -267,4 +290,8 @@ def load_project_config(path: Path) -> ProjectConfig:
         java_executable=str(data.get("java_executable") or "java"),
         scan_method=os.environ.get("NEXUSFIX_SCAN_METHOD") or str(data.get("scan_method") or ""),
         run_contract_tests=bool(data.get("run_contract_tests", False)),
+        # Environment wins, as it does for the IQ CLI settings above: config.yml is
+        # committed and shared, while where the export was downloaded to is per-machine.
+        appsec_sheet=os.environ.get("NEXUSFIX_APPSEC_SHEET") or str(appsec.get("sheet") or ""),
+        appsec_columns={str(k): str(v) for k, v in (appsec.get("columns") or {}).items()},
     )

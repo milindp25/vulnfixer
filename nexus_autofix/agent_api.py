@@ -52,13 +52,51 @@ class FindingView:
     pulled_in_by: list[str] = field(default_factory=list)
     actionable: bool = True
     reason_not_actionable: str | None = None
+    #: Nexus IQ named a target version, but a rule held it back — a major jump, most often.
+    #: Distinct from "there is nothing to do": these CAN be fixed, once a human says so.
+    #: The agent is expected to investigate these and recommend; `nexusfix approve` is how
+    #: the human answers. False for a finding with no target version at all, which no
+    #: amount of approving can help.
+    needs_approval: bool = False
+    #: Where this finding came from: "iq" (a Nexus IQ policy violation), "appsec" (the SCA
+    #: worksheet), or both when the same component is reported by each. Defaults to "iq" so
+    #: an ordinary `discover` run is unchanged.
+    source: list[str] = field(default_factory=lambda: ["iq"])
+    #: CVEs behind this finding. An AppSec library carries every CVE from the rows that
+    #: folded into it — the export lists one row per CVE.
+    cve_ids: list[str] = field(default_factory=list)
+    #: What each source recommends, when there is an AppSec finding to compare. Both are
+    #: populated even once resolved, so the PR shows what the choice was between.
+    iq_version: str | None = None
+    sheet_version: str | None = None
+    #: RESOLVED / CONFLICT / SWAP_ONLY / NO_TARGET. None for a plain IQ finding.
+    appsec_decision: str | None = None
+    #: The only versions `nexusfix resolve` will accept. Empty unless CONFLICT.
+    candidate_versions: list[str] = field(default_factory=list)
+    #: Fixes the sheet proposes that name a DIFFERENT artifact — a migration rather than a
+    #: bump. Recorded so a human can see them; never applied.
+    swap_candidates: list[str] = field(default_factory=list)
 
 
-def finding_views(findings: list[Finding], min_threat_level: int) -> list[FindingView]:
+def finding_views(
+    findings: list[Finding],
+    min_threat_level: int,
+    not_actionable: dict[str, str] | None = None,
+) -> list[FindingView]:
+    """Turn findings into what the agent reads out of run.json.
+
+    `not_actionable` maps package_url -> why, for findings `filter_findings` escalated —
+    a major version jump, a target that is not actually newer, a suppressed component.
+    Without it, `actionable` reflects only whether Nexus IQ named ANY target version, which
+    is true even for a change no one should make unattended. The RUNBOOK tells the agent to
+    use `target_version` exactly, so anything reaching it as actionable will be attempted.
+    """
+    escalated = not_actionable or {}
     views = []
     for f in findings:
         if f.threat_level < min_threat_level or f.is_waived:
             continue
+        reason = escalated.get(f.package_url)
         views.append(
             FindingView(
                 component=f.component,
@@ -70,13 +108,100 @@ def finding_views(findings: list[Finding], min_threat_level: int) -> list[Findin
                 policy_name=f.policy_name,
                 is_direct=f.is_direct,
                 pulled_in_by=list(f.dependency_path or []),
-                actionable=f.is_actionable,
-                reason_not_actionable=None if f.is_actionable else (
+                actionable=f.is_actionable and reason is None,
+                reason_not_actionable=reason or (None if f.is_actionable else (
                     f.escalation_reason or "Nexus IQ offered no newer version"
-                ),
+                )),
+                cve_ids=list(f.cve_ids or []),
+                # Held back by a rule, but IQ did name a version — so a human can release
+                # it. A finding with no target version is not approvable at any price.
+                needs_approval=reason is not None and f.is_actionable,
             )
         )
     return views
+
+
+def appsec_finding_views(resolved: list[tuple]) -> list[FindingView]:
+    """Turn resolved AppSec targets into the same view the agent already reads.
+
+    Takes (target, component, package_url) triples: the component NAME has to come from the
+    caller because it is only authoritative when the library matched an IQ violation —
+    `_clean_component_name` produces "groupId:artifactId", which is what `merge_views`
+    joins on, and a library with no group id cannot produce that on its own.
+
+    Producing FindingView rather than a parallel shape is the whole reason `check`,
+    `publish` and RUNBOOK.md need no structural change: an AppSec finding is just a finding
+    with a different `source`.
+    """
+    from nexus_autofix.appsec.resolve import Decision
+
+    views = []
+    for target, component, package_url in resolved:
+        library = target.library
+        views.append(
+            FindingView(
+                component=component,
+                package_url=package_url,
+                current_version=target.current_version,
+                target_version=target.target_version,
+                remediation_type="appsec",
+                # The sheet grades with CVSS3, not IQ's 0-10 threat level. Rounding one into
+                # the other would invent a number IQ never produced, so this stays 0 and the
+                # CVSS score travels in its own field.
+                threat_level=0,
+                policy_name="AppSec SCA worksheet",
+                is_direct=bool(library.direct),
+                actionable=target.actionable,
+                reason_not_actionable=None if target.actionable else target.reason,
+                source=["appsec"],
+                cve_ids=list(library.cve_ids),
+                iq_version=target.iq_version,
+                sheet_version=target.sheet_version,
+                appsec_decision=target.decision.value,
+                candidate_versions=(
+                    list(target.candidates) if target.decision is Decision.CONFLICT else []
+                ),
+                swap_candidates=[str(g) for g in target.swap_candidates],
+            )
+        )
+    return views
+
+
+def merge_views(iq_views: list[FindingView], appsec_views: list[FindingView]) -> list[FindingView]:
+    """One entry per component, even when both sources report it.
+
+    Two findings for one manifest line would hand the agent two instructions for the same
+    edit. The IQ entry wins on the version — it comes from the policy engine and describes
+    the branch being scanned — while the AppSec entry contributes its CVEs and the fact that
+    AppSec is tracking this too.
+    """
+    by_component = {view.component: view for view in iq_views}
+    merged = list(iq_views)
+
+    for view in appsec_views:
+        existing = by_component.get(view.component)
+        if existing is None:
+            merged.append(view)
+            continue
+
+        existing.source = sorted(set(existing.source) | set(view.source))
+        existing.cve_ids = list(dict.fromkeys([*existing.cve_ids, *view.cve_ids]))
+        existing.sheet_version = view.sheet_version
+        existing.iq_version = view.iq_version
+        existing.appsec_decision = view.appsec_decision
+        existing.swap_candidates = view.swap_candidates
+
+        # The AppSec decision was reached WITH IQ's remediation as one of its two inputs, so
+        # it is the better-informed of the two — never the weaker one to discard. In
+        # particular a CONFLICT must survive the merge: leaving IQ's target in place here
+        # would quietly resolve, in IQ's favour, the exact disagreement a human is supposed
+        # to settle, and `check` would let it through.
+        if not view.actionable:
+            existing.actionable = False
+            existing.target_version = view.target_version
+            existing.reason_not_actionable = view.reason_not_actionable
+            existing.candidate_versions = view.candidate_versions
+    return merged
 
 
 def as_json(payload: object) -> str:

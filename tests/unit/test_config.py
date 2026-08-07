@@ -351,3 +351,46 @@ def test_a_repo_block_without_a_url_says_what_to_do(tmp_path, monkeypatch):
         _cfg(tmp_path, monkeypatch, "repos:\n  broken:\n    scan_target: build\n")
 
     assert "no `url:` key" in str(exc.value)
+
+
+def test_iq_app_id_defaults_to_the_config_key(tmp_path, monkeypatch):
+    # The overwhelmingly common case, and every config written before iq_app_id existed.
+    config = _cfg(tmp_path, monkeypatch, "repos:\n  payments-core: https://x/o/payments-core.git\n")
+    assert config.iq_app_id_for("payments-core") == "payments-core"
+
+
+def test_iq_app_id_can_differ_from_the_config_key(tmp_path, monkeypatch):
+    """The key is what you type; Nexus IQ may know the application by another name."""
+    config = _cfg(tmp_path, monkeypatch, """
+repos:
+  payments-core:
+    url: https://github.com/org/payments-core.git
+    iq_app_id: card-payments-core
+""")
+
+    assert config.iq_app_id_for("payments-core") == "card-payments-core"
+    # The key still addresses the repo and its per-repo settings.
+    assert config.repos["payments-core"] == "https://github.com/org/payments-core.git"
+
+
+def test_iq_app_id_of_an_unknown_key_is_the_key_itself(tmp_path, monkeypatch):
+    # No special case for a key that is not in repos: callers validate membership first,
+    # and inventing a different answer here would only mask that.
+    config = _cfg(tmp_path, monkeypatch, "repos:\n  known: https://x/o/known.git\n")
+    assert config.iq_app_id_for("nope") == "nope"
+
+
+def test_per_repo_settings_stay_keyed_by_the_config_key(tmp_path, monkeypatch):
+    config = _cfg(tmp_path, monkeypatch, """
+repos:
+  payments-core:
+    url: https://github.com/org/payments-core.git
+    iq_app_id: card-payments-core
+    stage_id: stage-release
+    run_contract_tests: true
+""")
+
+    assert config.stage_id_for("payments-core") == "stage-release"
+    assert config.run_contract_tests_for("payments-core") is True
+    # Not by the IQ name — that string addresses nothing in config.yml.
+    assert config.stage_id_for("card-payments-core") == config.default_stage_id

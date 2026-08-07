@@ -16,14 +16,22 @@ import click
 
 from nexus_autofix import agent_api
 from nexus_autofix.agent.copilot_cli import CopilotCLIAgent
+from nexus_autofix.appsec import match as appsec_match
+from nexus_autofix.appsec import resolve as appsec_resolve
+from nexus_autofix.appsec import sheet as appsec_sheet
 from nexus_autofix.agent.interactive import InteractiveAgent
 from nexus_autofix.agent.mock import MockAgent, MockMode
 from nexus_autofix.config import ProjectConfig, Secrets, load_project_config, load_secrets
 from nexus_autofix.iq import cli_scan as cli_scan_mod
 from nexus_autofix.iq import remediation as remediation_mod
 from nexus_autofix.iq.client import HTTPIQClient
-from nexus_autofix.iq.filter import is_a_real_upgrade
-from nexus_autofix.http import try_enable_os_trust_store, warn_if_insecure
+from nexus_autofix.iq.filter import BumpSize, classify_bump, filter_findings, is_a_real_upgrade
+from nexus_autofix.http import (
+    CABundleError,
+    ensure_ca_bundle,
+    try_enable_os_trust_store,
+    warn_if_insecure,
+)
 from nexus_autofix.iq.models import Finding
 from nexus_autofix.logging_setup import configure_logging
 from nexus_autofix.orchestrator import Orchestrator, RunConfig, RunResult
@@ -377,6 +385,23 @@ def main():
     """nexus-autofix — automated remediation of Nexus IQ dependency findings."""
 
 
+def _setup_tls(secrets: Secrets) -> None:
+    """Everything TLS, before the first HTTPS call.
+
+    Called by every command that talks to Nexus IQ rather than just the two that used to
+    do the trust-store dance. `ensure_ca_bundle` exports NEXUSFIX_CA_BUNDLE into the
+    process, and each command is its own process — so leaving it out of `publish` would
+    mean `discover` succeeding and `publish` failing on certificates, which reads like a
+    bug in publish rather than a missing setup step.
+    """
+    log.debug("TLS: OS trust store %s", try_enable_os_trust_store())
+    try:
+        ensure_ca_bundle(secrets.workspace_root / "tools")
+    except CABundleError as exc:
+        raise click.ClickException(str(exc)) from exc
+    warn_if_insecure()
+
+
 def _require_secrets(secrets: Secrets, dry_run: bool) -> None:
     """Fail fast with an actionable message rather than a confusing HTTP error later."""
     missing = [
@@ -428,13 +453,15 @@ def perform_run(
     log.info("run %s starting: app_id=%s branch=%s gate=%s dry_run=%s mock_agent=%s interactive_agent=%s",
              run_id, app_id, branch, gate, dry_run, mock_agent, interactive_agent)
     log.info("full DEBUG log (incl. every IQ request/response body): %s", log_file)
-    log.debug("TLS: OS trust store %s", try_enable_os_trust_store())
-    warn_if_insecure()
+    _setup_tls(secrets)
 
     iq_client = HTTPIQClient(secrets.iq_url, secrets.iq_username, secrets.iq_password)
 
-    log.info("resolving Nexus IQ application %r at %s", app_id, secrets.iq_url)
-    internal_id = iq_client.resolve_application_internal_id(app_id)
+    # The config.yml key and the Nexus IQ application ID are allowed to differ; only IQ
+    # calls use the latter. See ProjectConfig.iq_app_id_for.
+    iq_app_id = config.iq_app_id_for(app_id)
+    log.info("resolving Nexus IQ application %r at %s", iq_app_id, secrets.iq_url)
+    internal_id = iq_client.resolve_application_internal_id(iq_app_id)
 
     mirror_path = workspace_root / "mirrors" / app_id
     log.info("mirroring %s -> %s", repo_url, mirror_path)
@@ -447,7 +474,7 @@ def perform_run(
         internal_id, branch, config.default_stage_id
     )
     baseline_report_id = iq_client.poll_evaluation(status_url, config.poll_timeout_seconds)
-    violations = iq_client.fetch_policy_report(app_id, baseline_report_id)
+    violations = iq_client.fetch_policy_report(iq_app_id, baseline_report_id)
 
     # The headline is what will be worked on, not what the report contains. Everything
     # below the bar is counted in one trailing clause and otherwise stays out of the way;
@@ -500,6 +527,7 @@ def perform_run(
 
     run_config = RunConfig(
         app_id=app_id,
+        iq_app_id=iq_app_id,
         branch=fix_branch,
         gate=gate,
         max_attempts=config.max_attempts,
@@ -687,6 +715,10 @@ def gc_command(older_than_days: int):
     """Sweep remote autofix/nexus/* branches with no open PR older than N days, for every configured repo."""
     config = load_project_config(Path("config.yml"))
     secrets = load_secrets()
+    # This talks to the GitHub API, so it needs the CA bundle like everything else. Without
+    # it, a machine configured only with NEXUSFIX_CA_BUNDLE_URL fails here on certificates
+    # while every other command works.
+    _setup_tls(secrets)
     for app_id, repo_url in config.repos.items():
         owner, repo = _owner_repo_from_url(repo_url)
         deleted = branch_mod.sweep_stale_branches(
@@ -839,7 +871,11 @@ def _scan_for_report(
     result = cli_scan_mod.run_cli_scan(
         jar_path=jar_path,
         scan_targets=scan_targets,
-        app_id=app_id,
+        # The IQ identifier, not the config key — this is the -i argument the CLI sends to
+        # Nexus IQ. Everything above (scan targets, stage, prescan) is keyed by the config
+        # entry instead. Defaults to the same string, so a config where they match is
+        # unaffected.
+        app_id=config.iq_app_id_for(app_id),
         iq_url=secrets.iq_url,
         username=secrets.iq_username,
         password=secrets.iq_password,
@@ -876,6 +912,35 @@ def _require_matching_scan_method(state: dict, config: ProjectConfig) -> None:
         )
 
 
+def _escalation_reason(finding: Finding) -> str:
+    """Why this finding must not be attempted unattended, in words for a human.
+
+    `filter_findings` returns escalated findings without saying which rule caught them, and
+    "actionable: false" with no reason is exactly the message that gets ignored.
+    """
+    if not finding.is_actionable:
+        return finding.escalation_reason or "Nexus IQ offered no version that clears this"
+    if not is_a_real_upgrade(finding.current_version, finding.target_version or ""):
+        return (
+            f"Nexus IQ offered {finding.target_version}, which is not newer than the "
+            f"installed {finding.current_version}. For a transitive dependency this usually "
+            "means the fix belongs in whichever parent pulls it in."
+        )
+    bump = classify_bump(finding.current_version, finding.target_version or "")
+    if bump is BumpSize.MAJOR:
+        return (
+            f"{finding.current_version} -> {finding.target_version} crosses a major version. "
+            "A major bump can change the API and break whatever else depends on this "
+            "package, which a passing build does not rule out. A human decides this one."
+        )
+    if bump is BumpSize.UNKNOWN:
+        return (
+            f"cannot tell how large the {finding.current_version} -> {finding.target_version} "
+            "change is — neither version parses as a version number."
+        )
+    return finding.escalation_reason or "escalated by policy"
+
+
 def perform_discovery(
     app_id: str, branch: str, config: ProjectConfig, secrets: Secrets, verbose: bool = False
 ) -> dict:
@@ -891,11 +956,17 @@ def perform_discovery(
     fix_branch = f"autofix/nexus/{run_id}"
     configure_logging(run_dir / "nexusfix.log", verbose=verbose)
     log.info("discover %s: app_id=%s branch=%s", run_id, app_id, branch)
-    try_enable_os_trust_store()
-    warn_if_insecure()
+    _setup_tls(secrets)
+
+    # `app_id` here is the config.yml key. Nexus IQ may know this application by a
+    # different name, so everything IQ-facing goes through iq_app_id and everything else
+    # (mirrors, per-repo settings, run state) stays keyed by what you typed.
+    iq_app_id = config.iq_app_id_for(app_id)
+    if iq_app_id != app_id:
+        log.info("config key %r maps to Nexus IQ application %r", app_id, iq_app_id)
 
     iq_client = HTTPIQClient(secrets.iq_url, secrets.iq_username, secrets.iq_password)
-    internal_id = iq_client.resolve_application_internal_id(app_id)
+    internal_id = iq_client.resolve_application_internal_id(iq_app_id)
     mirror_path = workspace_root / "mirrors" / app_id
     clone_or_update_mirror(repo_url, mirror_path)
     commit_sha = resolve_branch_commit_sha(mirror_path, branch)
@@ -928,18 +999,44 @@ def perform_discovery(
         run_dir=run_dir, ecosystem=strategy.ecosystem, java_version=java_version,
         node_version=node_version, label="baseline",
     )
-    violations = iq_client.fetch_policy_report(app_id, baseline_report_id)
+    violations = iq_client.fetch_policy_report(iq_app_id, baseline_report_id)
     findings = findings_from_policy_report(
         iq_client, internal_id, violations, config.default_stage_id, config.min_threat_level
     )
 
-    views = agent_api.finding_views(findings, config.min_threat_level)
+    # The SAME gate the `run` path applies, and previously the only place it was applied.
+    # Without it `actionable` meant nothing more than "Nexus IQ named some version", which
+    # is true of a 3.x -> 5.x jump — and the RUNBOOK tells the agent to use target_version
+    # exactly. So major bumps, targets that are not upgrades, and suppressed components were
+    # all being handed over as work to do.
+    descriptor = read_descriptor(worktree.path / ".security-fix.yml")
+    suppressed = unexpired_suppressions(descriptor, date.today())
+    filtered = filter_findings(findings, suppressed, config.min_threat_level)
+    log.info(
+        "filter: %d actionable, %d escalated, %d ignored (threat level >= %d)",
+        len(filtered.actionable), len(filtered.escalate), len(filtered.ignore),
+        config.min_threat_level,
+    )
+    escalation_reasons = {f.package_url: _escalation_reason(f) for f in filtered.escalate}
+    for finding in filtered.escalate:
+        log.info("  escalated: %s %s -> %s — %s", finding.component, finding.current_version,
+                 finding.target_version or "no target", escalation_reasons[finding.package_url])
+
+    # `ignore` is dropped entirely: below the threat bar, waived, or suppressed. Escalated
+    # findings stay visible, because a human is meant to see those.
+    visible = [*filtered.actionable, *filtered.escalate]
+    views = agent_api.finding_views(visible, config.min_threat_level, escalation_reasons)
     state = {
         "run_id": run_id,
         "run_dir": str(run_dir),
         "worktree": str(worktree.path),
         "fix_branch": fix_branch,
         "app_id": app_id,
+        # Both are recorded because `check` and `publish` need different ones: `check`
+        # looks up this repo's per-repo settings by the config key, while `publish` fetches
+        # reports from IQ by the IQ identifier. Storing one and deriving the other later
+        # would need config.yml to be unchanged since the run started.
+        "iq_app_id": iq_app_id,
         "base_branch": branch,
         "repo_url": repo_url,
         "commit_sha": commit_sha,
@@ -951,7 +1048,10 @@ def perform_discovery(
         "ecosystem": strategy.ecosystem,
         "java_version": java_version,
         "node_version": node_version,
-        "target_purls": [f.package_url for f in findings if f.is_actionable],
+        # Only what this run actually set out to fix. An escalated finding left in here
+        # makes publish's rescan see it still failing and delete the branch — throwing away
+        # every good fix over one nobody attempted.
+        "target_purls": [f.package_url for f in filtered.actionable],
         "build_command": " ".join(commands_mod.BUILD_COMMANDS[strategy.ecosystem](worktree.path)),
         "test_command": " ".join(commands_mod.TEST_COMMANDS[strategy.ecosystem](worktree.path)),
         # `check` and `publish` read config.yml and .env from the CWD, so they only work
@@ -1087,13 +1187,431 @@ def discover_command(app_id: str | None, branch: str | None, verbose: bool):
             "need --app-id and --branch (or NEXUSFIX_APP_ID / NEXUSFIX_BRANCH in .env)"
         )
     if app_id not in config.repos:
-        raise click.ClickException(f"no repo URL configured for app_id={app_id!r} in config.yml")
+        raise click.ClickException(
+            f"{app_id!r} is not in config.yml's `repos:` map. That key is the name you "
+            f"choose for the application, not necessarily what Nexus IQ calls it — set "
+            f"`iq_app_id` under it if the two differ.\n"
+            f"  Configured: {', '.join(sorted(config.repos)) or '(none)'}"
+        )
     _require_secrets(secrets, dry_run=True)
 
     payload = perform_discovery(app_id, branch, config, secrets, verbose)
     _agent_json(payload)
     _echo_next_steps(payload)
 
+
+# --- AppSec findings ------------------------------------------------------------------
+# Findings from the AppSec SCA worksheet: libraries that are quarantined or about to be
+# flagged, which Nexus IQ has NOT raised as policy violations yet. IQ's /policy endpoint
+# returns only components carrying a violation, so `discover` cannot see these at all — and
+# one that IS flagged below min_threat_level is filtered out before it reaches the agent.
+
+#: LIBRARY_TYPE, by the ecosystem the repo declares in `.trident/build.yaml`.
+#:
+#: The repo's own declaration is the authority on what it is — the same rule the rest of
+#: this tool follows, and the reason `discover` refuses to run without a usable trident
+#: file rather than guessing from the files it finds. This map exists only to drop rows
+#: for a DIFFERENT ecosystem: one export covers many repos, and a JavaScript row read with
+#: jar-filename rules yields a plausible-looking artifact that does not exist.
+#:
+#: Covers every value in trident's KNOWN_ECOSYSTEMS. An unknown one runs unfiltered rather
+#: than silently matching nothing, because a filter that excludes everything is
+#: indistinguishable from a sheet with nothing in it.
+APPSEC_LIBRARY_TYPES = {
+    "gradle": "Java",
+    "maven": "Java",
+    "npm": "JavaScript",
+    "yarn": "JavaScript",
+    "pnpm": "JavaScript",
+}
+
+
+def perform_appsec_discovery(
+    app_id: str, branch: str, sheet_path: Path, config: ProjectConfig, secrets: Secrets,
+    verbose: bool = False,
+) -> dict:
+    """A normal discovery, plus this repo's rows from the AppSec worksheet.
+
+    Folded into ONE run rather than a second one: both sets of changes touch the same
+    manifest, so separate runs would mean two worktrees editing the same lines, two builds,
+    and two PRs that conflict with each other.
+    """
+    payload = perform_discovery(app_id, branch, config, secrets, verbose)
+    run_dir = Path(payload["run_dir"])
+    ecosystem = payload["ecosystem"]
+    owner, repo = _owner_repo_from_url(payload["repo_url"])
+
+    library_type = APPSEC_LIBRARY_TYPES.get(ecosystem, "")
+    if not library_type:
+        log.warning(
+            "no LIBRARY_TYPE is known for a %s repo, so AppSec rows are read unfiltered. "
+            "Filename parsing assumes a jar-style name; anything else is reported as "
+            "unreadable rather than guessed at.", ecosystem,
+        )
+
+    rows, stats = appsec_sheet.read_rows(
+        sheet_path, columns=config.appsec_columns, library_type=library_type
+    )
+    libraries = appsec_sheet.dedupe(rows)
+    mine = appsec_sheet.for_repo(libraries, owner, repo)
+    log.info(
+        "AppSec sheet: %d row(s) -> %d librar(ies), %d for %s/%s",
+        len(rows), len(libraries), len(mine), owner, repo,
+    )
+
+    # Re-fetched rather than threaded out of perform_discovery: it is the same report id, so
+    # the two cannot disagree, and `publish` already reads the baseline back the same way.
+    iq_client = HTTPIQClient(secrets.iq_url, secrets.iq_username, secrets.iq_password)
+    violations = iq_client.fetch_policy_report(
+        payload.get("iq_app_id") or app_id, payload["baseline_report_id"]
+    )
+    stage_id = config.stage_id_for(app_id)
+
+    resolved: list[tuple] = []
+    for library in mine:
+        violation = appsec_match.match_to_violation(library, violations)
+        # IQ's report states the installed groupId, which the sheet never does. That is the
+        # only thing able to settle a library whose candidates span several groups.
+        known_group = ((violation.component_identifier or {}).get("coordinates") or {}).get(
+            "groupId"
+        ) if violation is not None else None
+        if known_group:
+            library = appsec_sheet.narrow_to_group(library, str(known_group))
+
+        current_version = appsec_match.current_version_for(library, violation)
+        identifier = appsec_match.identifier_for(library, violation)
+
+        iq_version = None
+        if identifier:
+            remediation = iq_client.fetch_remediation(payload["internal_id"], identifier, stage_id)
+            chosen = remediation_mod.select_target(remediation, library.artifact_id, current_version)
+            iq_version = chosen.version if chosen else None
+        else:
+            # No group id anywhere: LIBRARY_FILENAME never carries one, and the only other
+            # place it appears is a same-artifact candidate in the topfix column. Without
+            # it there is no valid identifier, so IQ cannot be asked at all.
+            log.info(
+                "  %s: no group id available, so Nexus IQ cannot be asked about it",
+                library.artifact_id,
+            )
+
+        target = appsec_resolve.decide(library, current_version, iq_version)
+        component = (
+            violation.component if violation is not None
+            else (f"{library.group_id}:{library.artifact_id}" if library.group_id
+                  else library.artifact_id)
+        )
+        resolved.append((target, component, appsec_match.package_url_for(library, violation)))
+        log.info(
+            "  %s %s: %s -> %s (%s)", component, current_version, target.decision.value,
+            target.target_version or "-", target.reason,
+        )
+
+    appsec_views = agent_api.appsec_finding_views(resolved)
+    iq_views = [agent_api.FindingView(**view) for view in payload.get("findings") or []]
+    merged = agent_api.merge_views(iq_views, appsec_views)
+
+    conflicts = [v for v in merged if v.appsec_decision == appsec_resolve.Decision.CONFLICT.value]
+    state = {
+        **{k: v for k, v in payload.items() if k not in ("runbook", "open_this_in_your_editor")},
+        "findings": [asdict(v) for v in merged],
+        # Every actionable purl, so `publish`'s rescan covers the AppSec bumps too. Where a
+        # library was never a baseline violation this adds nothing false — compare_reports
+        # intersects against the rescan — and where it WAS one below the threat threshold,
+        # publish now correctly requires it to clear.
+        "target_purls": sorted({v.package_url for v in merged if v.actionable and v.package_url}),
+        "appsec": {
+            "sheet": str(sheet_path),
+            # The input is a file that gets re-exported; a run should be able to say which
+            # version of it produced these findings.
+            "sheet_sha256": _sha256_of(sheet_path),
+            "rows_total": stats.rows_total,
+            "rows_kept": stats.rows_kept,
+            "libraries_total": len(libraries),
+            "libraries_for_this_repo": len(mine),
+            "skipped_missing_repo": stats.skipped_missing_repo,
+            "skipped_missing_filename": stats.skipped_missing_filename,
+            "skipped_wrong_type": stats.skipped_wrong_type,
+            "skipped_unparsable_filename": stats.skipped_unparsable_filename,
+            "unresolved_conflicts": [v.component for v in conflicts],
+            "artifact_swaps": [
+                {"component": v.component, "proposed": v.swap_candidates}
+                for v in merged if v.appsec_decision == appsec_resolve.Decision.SWAP_ONLY.value
+            ],
+            # Same artifact name under several group ids, with nothing stating which is
+            # installed. Reported rather than guessed at — see sheet.narrow_to_group.
+            "ambiguous_groups": [
+                {"component": v.component, "reason": v.reason_not_actionable}
+                for v in merged
+                if v.appsec_decision == appsec_resolve.Decision.AMBIGUOUS_GROUP.value
+            ],
+            # Tokens the topfix column contained that are not coordinates. Surfaced so a
+            # candidate lost to a parsing gap is visible instead of silently absent.
+            "discarded_topfix_tokens": sorted(
+                {token for library in mine for token in library.topfix_discarded}
+            ),
+        },
+    }
+    agent_api.save_run_state(run_dir, state)
+    return {
+        **state,
+        "runbook": payload.get("runbook"),
+        "open_this_in_your_editor": payload.get("open_this_in_your_editor"),
+    }
+
+
+def _sha256_of(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(65536), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _appsec_sheet_path(sheet: str | None, config: ProjectConfig) -> Path:
+    # Tested BEFORE constructing a Path: Path("") is Path("."), whose str() is "." — which
+    # is truthy, so an emptiness check on the Path never fires and the caller gets
+    # "no AppSec worksheet at ." instead of being told how to supply one.
+    configured = (sheet or config.appsec_sheet or "").strip()
+    if not configured:
+        raise click.ClickException(
+            "need --sheet (or `appsec.sheet` in config.yml, or NEXUSFIX_APPSEC_SHEET in "
+            ".env) — the AppSec worksheet is the only source of these findings."
+        )
+    path = Path(configured)
+    if not path.is_file():
+        raise click.ClickException(
+            f"no AppSec worksheet at {path}. Download the export from Tableau and pass its "
+            "path; a SharePoint or Tableau URL cannot be read here."
+        )
+    return path
+
+
+@main.command("appsec-discover")
+@click.option("--sheet", default=None, help="Path to the AppSec SCA worksheet (.xlsx).")
+@click.option("--app-id", default=None, help="IQ public application ID. Defaults to $NEXUSFIX_APP_ID.")
+@click.option("--branch", default=None, help="Branch to scan. Defaults to $NEXUSFIX_BRANCH.")
+@click.option("-v", "--verbose", is_flag=True, default=False)
+@logs_failures("appsec-discover")
+def appsec_discover_command(sheet: str | None, app_id: str | None, branch: str | None, verbose: bool):
+    """Discover Nexus IQ findings AND AppSec worksheet findings in one run.
+
+    Everything `discover` does, plus the libraries the AppSec SCA export names for this
+    repo — quarantined or soon-to-be-flagged components that IQ has not raised as policy
+    violations, and which no IQ scan can therefore surface.
+
+    Where Nexus IQ and the sheet recommend different versions the run does NOT choose. The
+    finding is recorded as a CONFLICT with both candidates, `check` refuses until it is
+    settled, and `nexusfix resolve` is how a human settles it.
+    """
+    config = load_project_config(Path("config.yml"))
+    secrets = load_secrets()
+    app_id = app_id or secrets.default_app_id
+    branch = branch or secrets.default_branch
+    if not app_id or not branch:
+        raise click.ClickException(
+            "need --app-id and --branch (or NEXUSFIX_APP_ID / NEXUSFIX_BRANCH in .env)"
+        )
+    if app_id not in config.repos:
+        raise click.ClickException(
+            f"{app_id!r} is not in config.yml's `repos:` map. That key is the name you "
+            f"choose for the application, not necessarily what Nexus IQ calls it — set "
+            f"`iq_app_id` under it if the two differ.\n"
+            f"  Configured: {', '.join(sorted(config.repos)) or '(none)'}"
+        )
+    sheet_path = _appsec_sheet_path(sheet, config)
+    _require_secrets(secrets, dry_run=True)
+
+    payload = perform_appsec_discovery(app_id, branch, sheet_path, config, secrets, verbose)
+    _agent_json(payload)
+    _echo_next_steps(payload)
+    _echo_appsec_summary(payload)
+
+
+def _echo_appsec_summary(payload: dict) -> None:
+    """What needs a human, on stderr — stdout stays the machine contract."""
+    appsec = payload.get("appsec") or {}
+    conflicts = appsec.get("unresolved_conflicts") or []
+    swaps = appsec.get("artifact_swaps") or []
+    if not conflicts and not swaps:
+        return
+
+    lines = [""]
+    if conflicts:
+        lines.append(f"  {len(conflicts)} AppSec finding(s) need a decision before `check` will run:")
+        for view in payload.get("findings") or []:
+            if view.get("component") in conflicts:
+                candidates = " or ".join(view.get("candidate_versions") or [])
+                lines.append(
+                    f"    {view['component']} {view.get('current_version')} -> {candidates}"
+                )
+                lines.append(
+                    f"      nexusfix resolve --run-id {payload['run_id']} "
+                    f"--component {view['component']} --version <one of the above>"
+                )
+    if swaps:
+        lines.append(
+            f"  {len(swaps)} AppSec finding(s) propose a DIFFERENT artifact (a migration, "
+            "not a bump). These are reported only and will not be fixed:"
+        )
+        for swap in swaps:
+            lines.append(f"    {swap['component']} -> {', '.join(swap['proposed'])}")
+    lines.append("")
+    click.echo("\n".join(lines), err=True)
+
+
+@main.command("approve")
+@click.option("--run-id", required=True, help="The run_id printed by `discover`.")
+@click.option("--component", required=True, help="The component to release, as it appears in run.json.")
+@click.option(
+    "--version", "version", required=True,
+    help="The target version, typed out. Must match what Nexus IQ recommended.",
+)
+@logs_failures("approve")
+def approve_command(run_id: str, component: str, version: str):
+    """Allow a finding this tool held back — usually a major version jump.
+
+    A major bump is escalated by default because it can change an API and break whatever
+    depends on the package, which a passing build does not rule out. That default is
+    deliberate: an unanswered finding is never attempted.
+
+    This is how you say yes to one anyway. The agent is expected to investigate first and
+    tell you what it found — whether the repo uses the affected API, what the changelog
+    says, what else depends on it. It cannot run this for you; the decision is what makes
+    the change permissible, and an agent approving its own work would mean nothing.
+
+    `--version` must match what Nexus IQ recommended. It is a confirmation, not a choice:
+    typing it out is what makes approving the wrong component hard.
+    """
+    secrets = load_secrets()
+    try:
+        state = agent_api.load_run_state(secrets.workspace_root, run_id)
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    configure_logging(Path(state["run_dir"]) / "nexusfix.log")
+
+    findings = state.get("findings") or []
+    matches = [f for f in findings if f.get("component") == component]
+    if not matches:
+        matches = [f for f in findings if f.get("component", "").split(":")[-1] == component]
+    if not matches:
+        waiting = [f["component"] for f in findings if f.get("needs_approval")]
+        raise click.ClickException(
+            f"no finding named {component!r} in this run.\n"
+            + (f"  Awaiting approval: {', '.join(waiting)}" if waiting
+               else "  Nothing in this run is awaiting approval.")
+        )
+    if len(matches) > 1:
+        raise click.ClickException(
+            f"{component!r} matches {len(matches)} findings. Use the full group:artifact name."
+        )
+
+    finding = matches[0]
+    if not finding.get("needs_approval"):
+        raise click.ClickException(
+            f"{finding['component']} is not awaiting approval — it is "
+            + ("already being fixed." if finding.get("actionable") else
+               f"not fixable at all: {finding.get('reason_not_actionable')}")
+        )
+    if version.strip() != (finding.get("target_version") or ""):
+        raise click.ClickException(
+            f"{version.strip()!r} is not what Nexus IQ recommended for "
+            f"{finding['component']} — that is {finding.get('target_version')!r}.\n"
+            "  --version confirms which change you are approving; it does not choose one. "
+            "To use a different version, fix it by hand."
+        )
+
+    finding.update(actionable=True, needs_approval=False, reason_not_actionable=None,
+                   approved_by_human=True)
+    if finding.get("package_url"):
+        state["target_purls"] = sorted({*(state.get("target_purls") or []), finding["package_url"]})
+    agent_api.save_run_state(Path(state["run_dir"]), state)
+
+    log.info("approved %s -> %s", finding["component"], finding["target_version"])
+    _agent_json({
+        "ok": True,
+        "component": finding["component"],
+        "current_version": finding.get("current_version"),
+        "target_version": finding["target_version"],
+        "still_awaiting_approval": [f["component"] for f in findings if f.get("needs_approval")],
+        "message": (
+            f"{finding['component']} will now be upgraded to {finding['target_version']}. "
+            "Re-run check after the change is made."
+        ),
+    })
+
+
+@main.command("resolve")
+@click.option("--run-id", required=True, help="The run_id printed by `appsec-discover`.")
+@click.option("--component", required=True, help="The component to settle, as it appears in run.json.")
+@click.option("--version", "version", required=True, help="One of the two candidate versions.")
+@logs_failures("resolve")
+def resolve_command(run_id: str, component: str, version: str):
+    """Record which version to use where Nexus IQ and the AppSec sheet disagree.
+
+    Accepts ONLY one of the two versions already proposed. A third version is refused: the
+    point of routing the decision through this command rather than letting an agent edit
+    run.json is that "the agent explains, the human decides" is enforced rather than asked
+    for. If both candidates are wrong, fix the sheet or escalate.
+    """
+    secrets = load_secrets()
+    try:
+        state = agent_api.load_run_state(secrets.workspace_root, run_id)
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    configure_logging(Path(state["run_dir"]) / "nexusfix.log")
+
+    findings = state.get("findings") or []
+    matches = [f for f in findings if f.get("component") == component]
+    if not matches:
+        # Matching the artifact half too, because that is what a person reads off the
+        # sheet — "bcprov-jdk15on" rather than "org.bouncycastle:bcprov-jdk15on".
+        matches = [f for f in findings if f.get("component", "").split(":")[-1] == component]
+    if not matches:
+        awaiting = [
+            f["component"] for f in findings
+            if f.get("appsec_decision") == appsec_resolve.Decision.CONFLICT.value
+        ]
+        raise click.ClickException(
+            f"no finding named {component!r} in this run.\n"
+            + (f"  Awaiting a decision: {', '.join(awaiting)}" if awaiting
+               else "  Nothing in this run is awaiting a decision.")
+        )
+    if len(matches) > 1:
+        raise click.ClickException(
+            f"{component!r} matches {len(matches)} findings "
+            f"({', '.join(m['component'] for m in matches)}). Use the full group:artifact name."
+        )
+
+    try:
+        updated = appsec_resolve.choose_for_view(matches[0], version)
+    except appsec_resolve.ResolutionError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    state["findings"] = [updated if f is matches[0] else f for f in findings]
+    if updated.get("package_url"):
+        state["target_purls"] = sorted({*(state.get("target_purls") or []), updated["package_url"]})
+    still_open = [
+        f["component"] for f in state["findings"]
+        if f.get("appsec_decision") == appsec_resolve.Decision.CONFLICT.value
+    ]
+    state.setdefault("appsec", {})["unresolved_conflicts"] = still_open
+    agent_api.save_run_state(Path(state["run_dir"]), state)
+
+    log.info("resolved %s to %s", updated["component"], updated["target_version"])
+    _agent_json({
+        "ok": True,
+        "component": updated["component"],
+        "current_version": updated.get("current_version"),
+        "target_version": updated["target_version"],
+        "still_unresolved": still_open,
+        "message": (
+            f"{updated['component']} will be upgraded to {updated['target_version']}."
+            + ("" if still_open else " Nothing else is awaiting a decision; `check` can run.")
+        ),
+    })
 
 
 def _config_for_run(state: dict) -> ProjectConfig:
@@ -1113,6 +1631,45 @@ def _config_for_run(state: dict) -> ProjectConfig:
     return load_project_config(Path("config.yml"))
 
 
+def _require_appsec_conflicts_resolved(state: dict, run_id: str) -> None:
+    """Refuse to check while a version decision is still outstanding.
+
+    The gate lives here rather than in `check_worktree` because it is a property of the
+    RUN, not of the worktree — `check_worktree` is given a directory and knows nothing
+    about where its instructions came from.
+
+    Without this the agent is free to pick either candidate, or neither, and a passing
+    build would look like the disagreement had been settled. It has not: a build proves the
+    code compiles, not that the right version was chosen.
+    """
+    unresolved = [
+        finding for finding in state.get("findings") or []
+        if finding.get("appsec_decision") == appsec_resolve.Decision.CONFLICT.value
+    ]
+    if not unresolved:
+        return
+
+    lines = [
+        (
+            f"{len(unresolved)} AppSec finding(s) are still awaiting a decision — Nexus IQ "
+            "and the AppSec sheet recommend different versions, and nothing may be verified "
+            "until you say which to use:"
+        ),
+    ]
+    for finding in unresolved:
+        candidates = finding.get("candidate_versions") or []
+        lines.append(
+            f"  {finding['component']} {finding.get('current_version')} -> "
+            f"{' or '.join(candidates)}   (Nexus IQ: {finding.get('iq_version')}, "
+            f"AppSec sheet: {finding.get('sheet_version')})"
+        )
+        lines.append(
+            f"    nexusfix resolve --run-id {run_id} --component {finding['component']} "
+            f"--version {candidates[0] if candidates else '<version>'}"
+        )
+    raise click.ClickException("\n".join(lines))
+
+
 @main.command("check")
 @click.option("--run-id", required=True, help="The run_id printed by `nexusfix discover`.")
 @click.option("-v", "--verbose", is_flag=True, default=False)
@@ -1128,6 +1685,7 @@ def check_command(run_id: str, verbose: bool):
 
     run_dir = Path(state["run_dir"])
     configure_logging(run_dir / "nexusfix.log", verbose=verbose)
+    _require_appsec_conflicts_resolved(state, run_id)
     result = agent_api.check_worktree(
         worktree=Path(state["worktree"]),
         ecosystem=state["ecosystem"],
@@ -1206,6 +1764,7 @@ def publish_command(run_id: str, dry_run: bool, open_pr: bool, verbose: bool):
         )
 
     _require_secrets(secrets, dry_run)
+    _setup_tls(secrets)
     iq_client = HTTPIQClient(secrets.iq_url, secrets.iq_username, secrets.iq_password)
     fix_branch = state["fix_branch"]
 
@@ -1251,9 +1810,12 @@ def publish_command(run_id: str, dry_run: bool, open_pr: bool, verbose: bool):
         rescan_report_id = iq_client.poll_evaluation(
             rescan_status_url, config.poll_timeout_seconds
         )
+    # .get with a fallback: a run.json written before `iq_app_id` existed has only app_id,
+    # and back then the two were the same string by construction.
+    iq_app_id = state.get("iq_app_id") or state["app_id"]
     comparison = rescan_mod.compare_reports(
-        iq_client.fetch_policy_report(state["app_id"], state["baseline_report_id"]),
-        iq_client.fetch_policy_report(state["app_id"], rescan_report_id),
+        iq_client.fetch_policy_report(iq_app_id, state["baseline_report_id"]),
+        iq_client.fetch_policy_report(iq_app_id, rescan_report_id),
         set(state.get("target_purls") or []),
     )
 
@@ -1361,6 +1923,7 @@ def remediate_command(component: str, run_id: str | None, app_id: str | None, ve
     secrets = load_secrets()
     identifier = component_spec_to_identifier(component)
     current_version = (identifier.get("coordinates") or {}).get("version", "")
+    _setup_tls(secrets)
 
     if run_id:
         state = agent_api.load_run_state(secrets.workspace_root, run_id)
@@ -1378,7 +1941,7 @@ def remediate_command(component: str, run_id: str | None, app_id: str | None, ve
         configure_logging(secrets.workspace_root / "runs" / "adhoc" / "nexusfix.log", verbose=verbose)
         internal_id = HTTPIQClient(
             secrets.iq_url, secrets.iq_username, secrets.iq_password
-        ).resolve_application_internal_id(app_id)
+        ).resolve_application_internal_id(config.iq_app_id_for(app_id))
 
     iq_client = HTTPIQClient(secrets.iq_url, secrets.iq_username, secrets.iq_password)
     remediation = iq_client.fetch_remediation(internal_id, identifier, config.default_stage_id)

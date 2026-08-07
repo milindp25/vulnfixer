@@ -104,6 +104,21 @@ def _findings_section(findings: list[Finding]) -> str:
                 f"    Bump {finding.parent_component} from {finding.parent_current_version} to {finding.parent_target_version}",
                 "    This is the correct fix. Use it rather than an override.",
             ]
+        elif not finding.is_direct:
+            # No parent to bump, so the only correct edit is an override. Spelled out
+            # because an agent told merely "do not add a direct dependency" will invent
+            # something — adding the package to devDependencies, in the case that prompted
+            # this. That does not pin the transitive version at all.
+            lines += [
+                "", "  HOW TO FIX — this package is NOT in the manifest:",
+                f'    npm:        "overrides":    {{ "{finding.component}": "{finding.target_version}" }}',
+                f'    yarn/pnpm:  "resolutions":  {{ "{finding.component}": "{finding.target_version}" }}',
+                "    Then regenerate the lockfile.",
+                "    Do NOT add it to dependencies or devDependencies — that makes it a",
+                "    direct dependency of the application instead of constraining what the",
+                "    rest of the tree resolves to, and can leave the vulnerable copy in place.",
+                "    On Gradle/Maven there is no safe equivalent: report it and stop.",
+            ]
         if finding.golden_version and finding.golden_version != finding.target_version:
             lines += [
                 "", f"  Note: a non-breaking recommended version {finding.golden_version} is also",

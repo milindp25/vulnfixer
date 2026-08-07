@@ -8,6 +8,11 @@ __pycache__/
 .env.local
 state/*.db
 runs/
+
+# A fetched CA bundle normally lands in <workspace_root>/tools/, outside this tree
+# entirely. These cover the case where NEXUSFIX_CA_BUNDLE points somewhere in the repo.
+*.pem
+corporate-ca.pem*
 tests/fixtures/demo_gradle_repo/.gradle/
 tests/fixtures/demo_gradle_repo/build/
 

@@ -22,6 +22,37 @@ toolchains:
   java: {}
   node: {}
 
-# REQUIRED: Nexus IQ public application ID -> git clone URL.
+# AppSec (SCA worksheet) findings — libraries that are quarantined or about to be flagged,
+# which Nexus IQ has not raised as policy violations yet. Used only by `appsec-discover`.
+#
+# `sheet` is a default so --sheet can be omitted. A LOCAL path: the export comes from
+# Tableau via SharePoint, and a URL there needs an SSO session this tool does not have.
+#
+# `columns` is for a re-export that RENAMES a column. Column ORDER never matters — every
+# lookup is by header text, matched case-insensitively with spaces and underscores treated
+# alike, so "GITHUB_ORG", "github org" and "Github Org" are the same column. The defaults
+# are in nexus_autofix/appsec/sheet.py; override only what changed.
+appsec: {}
+#   sheet: ./SCA_Worksheet_data.xlsx
+#   columns:
+#     library_filename: LIBRARY_FILE_NAME
+
+# REQUIRED: the applications this tool may work on.
+#
+# The KEY is the name you use everywhere else — `--app-id`, NEXUSFIX_APP_ID, the mirror
+# directory, and the per-repo settings below. Call it whatever you actually call the repo:
+#
 #   payments-core: https://github.com/your-org/payments-core.git
+#
+# Nexus IQ is the one consumer that needs its own identifier, and it is often a different
+# string. Say so with `iq_app_id`; everything else stays keyed by the name above:
+#
+#   payments-core:
+#     url: https://github.com/your-org/payments-core.git
+#     iq_app_id: card-payments-core       # what Nexus IQ calls this application
+#
+# `iq_app_id` defaults to the key, so a config where the two already match needs no change.
+#
+# The AppSec sheet identifies a repo by GITHUB_ORG + GITHUB_REPO_NAME, which is exactly
+# what these clone URLs already carry, so no extra mapping is needed there.
 repos: {}

@@ -73,3 +73,44 @@ def test_prompt_includes_retry_section_with_verbatim_stdout():
     assert "Previous attempt failed" in prompt
     assert "FAILURE: Build failed with an exception." in prompt
     assert "attempt 2 of 2" in prompt
+
+
+def test_a_transitive_finding_with_no_parent_is_told_to_use_an_override():
+    """The gap that let an agent add the package to devDependencies instead.
+
+    Telling it only "do not add a direct dependency" leaves it to invent something, and
+    what it invented does not pin the transitive version at all.
+    """
+    from nexus_autofix.agent.prompt import _findings_section
+
+    finding = _finding(
+        component="nanoid", current_version="3.3.7", target_version="3.3.8",
+        is_direct=False, dependency_path=["pkg:npm/postcss@8.4.31"], parent_component=None,
+    )
+    text = _findings_section([finding])
+
+    assert '"overrides"' in text and '"resolutions"' in text
+    assert '"nanoid": "3.3.8"' in text
+    assert "Do NOT add it to dependencies or devDependencies" in text
+
+
+def test_a_parent_remediation_still_wins_over_an_override():
+    from nexus_autofix.agent.prompt import _findings_section
+
+    finding = _finding(
+        component="nanoid", is_direct=False, dependency_path=["pkg:npm/postcss@8.4.31"],
+        parent_component="postcss", parent_current_version="8.4.31",
+        parent_target_version="8.4.32",
+    )
+    text = _findings_section([finding])
+
+    assert "PREFERRED FIX" in text
+    # The override block is the fallback for when there is no parent, not an alternative.
+    assert "HOW TO FIX" not in text
+
+
+def test_a_direct_finding_gets_no_override_advice():
+    from nexus_autofix.agent.prompt import _findings_section
+
+    text = _findings_section([_finding(is_direct=True)])
+    assert "overrides" not in text
